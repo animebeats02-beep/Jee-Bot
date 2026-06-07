@@ -12,7 +12,7 @@ import requests
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_KEY = os.getenv("GROQ_API_KEY")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama3-8b-8192"  # free, fast, excellent for coaching
+GROQ_MODEL = "llama-3.3-70b-versatile"  # free, fast, excellent for coaching
 
 DATA_DIR = "/tmp/data" if os.getenv("RENDER") else "data"
 os.makedirs(DATA_DIR, exist_ok=True)
