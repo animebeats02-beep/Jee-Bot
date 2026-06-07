@@ -689,7 +689,7 @@ async def view_plan(update, context):
     msg = "📅 *Today's Plan*\n" + "\n".join(
         f"`{b['start']}-{b['end']}` {b['description']} [{b['status']}]" for b in today["plan"]
     )
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    await update.message.reply_text(msg)
 
 # ---------- message router ----------
 async def handle_message(update, context):
