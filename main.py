@@ -164,7 +164,7 @@ Always reply in the same language as the user.
     full_prompt = f"{system_instruction}\n\n{context}\nUser: {prompt}"
     try:
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.0-flash",
             contents=full_prompt
         )
         return response.text
