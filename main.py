@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+import time
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -140,10 +141,12 @@ def generate_plan():
     save_json("today", memory["today"])
     return plan
 
-# ---------- AI (Gemini - new library) ----------
+# ---------- AI (Gemini) ----------
 def ask_gemini(prompt):
     if not client:
         return "AI not available. Please set GEMINI_API_KEY."
+    # Rate limit safeguard: wait 2 seconds before every request
+    time.sleep(2)
     weak = get_weak_chapters()[:5]
     backlog_count = len([t for t in memory["backlog"]["tasks"] if t["status"] != "done"])
     tests = [t["name"] for t in memory["tests"]["upcoming"]]
@@ -164,12 +167,15 @@ Always reply in the same language as the user.
     full_prompt = f"{system_instruction}\n\n{context}\nUser: {prompt}"
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.0-flash-lite",
             contents=full_prompt
         )
         return response.text
     except Exception as e:
-        return f"AI error: {str(e)}"
+        err = str(e)
+        if "429" in err or "RESOURCE_EXHAUSTED" in err:
+            return "⏳ I’m a bit overloaded right now (free tier limit). Please wait a minute and try again. Your data is safe."
+        return f"AI error: {err}"
 
 # ---------- BOT COMMANDS ----------
 async def start(update, context):
@@ -462,6 +468,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("complete_task", complete_task_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.job_queue.run_repeating(autonomous_check, interval=600, first=10)
+    if app.job_queue:
+        app.job_queue.run_repeating(autonomous_check, interval=600, first=10)
+    else:
+        print("JobQueue not available – autonomous reminders disabled")
     print("Bot polling...")
     app.run_polling()
