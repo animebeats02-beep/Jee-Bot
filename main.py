@@ -1,25 +1,21 @@
-# main.py - JEE Study OS Telegram Bot (Gemini, Free 24/7)
 import os
 import json
 import threading
-import time
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import logging
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-import google.generativeai as genai
+from google import genai
 
 # ---------- CONFIG ----------
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    client = genai.Client(api_key=GEMINI_KEY)
 else:
-    model = None
+    client = None
 
 # ---------- MEMORY (JSON) ----------
 DATA_DIR = "/tmp/data" if os.getenv("RENDER") else "data"
@@ -40,20 +36,7 @@ def save_json(name, data):
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
 
-def init_memory():
-    return {
-        "backlog": load_json("backlog", {"tasks": []}),
-        "today": load_json("today", {"date": "", "plan": [], "generated": False}),
-        "schedule": load_json("schedule", {"wake_up": "07:00", "sleep": "22:00", "study_hours": 8, "weekly_timetable": "", "last_updated": ""}),
-        "progress": load_json("progress", {"logs": []}),
-        "stats": load_json("stats", {"productivity": [], "consistency": 0, "fatigue_flags": 0}),
-        "syllabus": load_json("syllabus", {"chapters": init_syllabus()}),
-        "tests": load_json("tests", {"upcoming": [], "past": []}),
-        "homework": load_json("homework", {"date": "", "tasks": []}),
-    }
-
 def init_syllabus():
-    # Complete JEE syllabus (Class 11 + 12)
     subjects = {
         "Physics": ["Units & Measurements","Motion in Straight Line","Motion in Plane","Laws of Motion","Work Energy Power","Rotational Motion","Gravitation","Mechanical Properties Solids","Mechanical Properties Fluids","Thermal Properties","Thermodynamics","Kinetic Theory","Oscillations","Waves","Electric Charges Fields","Electrostatic Potential","Current Electricity","Moving Charges Magnetism","Magnetism Matter","Electromagnetic Induction","Alternating Current","Electromagnetic Waves","Ray Optics","Wave Optics","Dual Nature Radiation","Atoms","Nuclei","Semiconductor Electronics","Communication Systems"],
         "Chemistry": ["Some Basic Concepts","Structure Atom","Classification Periodicity","Chemical Bonding","States Matter","Thermodynamics","Equilibrium","Redox Reactions","Hydrogen","s-Block","p-Block 11","Organic Basic Principles","Hydrocarbons","Environmental","Solid State","Solutions","Electrochemistry","Chemical Kinetics","Surface Chemistry","Metallurgy","p-Block 12","d & f Block","Coordination Compounds","Haloalkanes","Alcohols Phenols Ethers","Aldehydes Ketones","Amines","Biomolecules","Polymers","Chemistry Everyday"],
@@ -67,30 +50,38 @@ def init_syllabus():
                 chapters[key] = {"subject": sub, "chapter": ch, "class": cls, "status": "not_started", "priority": 5}
     return chapters
 
+def init_memory():
+    return {
+        "backlog": load_json("backlog", {"tasks": []}),
+        "today": load_json("today", {"date": "", "plan": [], "generated": False}),
+        "schedule": load_json("schedule", {"wake_up": "07:00", "sleep": "22:00", "study_hours": 8, "weekly_timetable": "", "last_updated": ""}),
+        "progress": load_json("progress", {"logs": []}),
+        "stats": load_json("stats", {"productivity": [], "consistency": 0, "fatigue_flags": 0}),
+        "syllabus": load_json("syllabus", {"chapters": init_syllabus()}),
+        "tests": load_json("tests", {"upcoming": [], "past": []}),
+        "homework": load_json("homework", {"date": "", "tasks": []}),
+    }
+
 memory = init_memory()
-# ---------- END MEMORY ----------
 
 # ---------- HELPERS ----------
 def get_weak_chapters():
     return [k for k,v in memory["syllabus"]["chapters"].items() if v["status"] in ("weak","revision_needed")]
 
 def get_test_chapters():
-    chap_list = []
+    chaps = []
     for t in memory["tests"]["upcoming"]:
-        chap_list.extend(t.get("syllabus", []))
-    return list(set(chap_list))
+        chaps.extend(t.get("syllabus", []))
+    return list(set(chaps))
 
 def compute_priority(task):
     score = 50
     weak = get_weak_chapters()
     test_chaps = get_test_chapters()
-    # test linkage
     if task.get("test_link") in [t["name"] for t in memory["tests"]["upcoming"]]:
         score += 30
-    # weak topic
     if task.get("chapter_key") in weak:
         score += 25
-    # source
     if task.get("source") in ("test", "AI"):
         score += 15
     return score
@@ -99,7 +90,6 @@ def generate_plan():
     schedule = memory["schedule"]
     wake = schedule["wake_up"]
     study_mins = schedule["study_hours"] * 60
-    # combine homework and backlog
     hw = memory["homework"]["tasks"] if memory["homework"]["date"] == datetime.now().strftime("%Y-%m-%d") else []
     backlog = [t for t in memory["backlog"]["tasks"] if t["status"] != "done"]
     all_tasks = []
@@ -110,12 +100,10 @@ def generate_plan():
         t["priority_score"] = compute_priority(t)
         all_tasks.append(t)
     all_tasks.sort(key=lambda x: x["priority_score"], reverse=True)
-    # build hourly plan
     wake_time = datetime.strptime(wake, "%H:%M")
     current = wake_time
     plan = []
     remaining = study_mins
-    break_after = 90  # minutes
     task_count = 0
     for task in all_tasks:
         if remaining <= 0:
@@ -136,7 +124,6 @@ def generate_plan():
         remaining -= block
         task_count += 1
         if task_count % 3 == 0 and remaining > 0:
-            # break
             break_end = current + timedelta(minutes=15)
             plan.append({
                 "task_id": "break",
@@ -153,11 +140,10 @@ def generate_plan():
     save_json("today", memory["today"])
     return plan
 
-# ---------- AI (Gemini) ----------
+# ---------- AI (Gemini - new library) ----------
 def ask_gemini(prompt):
-    if not model:
+    if not client:
         return "AI not available. Please set GEMINI_API_KEY."
-    # Build memory summary
     weak = get_weak_chapters()[:5]
     backlog_count = len([t for t in memory["backlog"]["tasks"] if t["status"] != "done"])
     tests = [t["name"] for t in memory["tests"]["upcoming"]]
@@ -177,7 +163,10 @@ Always reply in the same language as the user.
 """
     full_prompt = f"{system_instruction}\n\n{context}\nUser: {prompt}"
     try:
-        response = model.generate_content(full_prompt)
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=full_prompt
+        )
         return response.text
     except Exception as e:
         return f"AI error: {str(e)}"
@@ -195,7 +184,7 @@ async def help_cmd(update, context):
 /view_plan – Show today's schedule
 /add_homework – Add coaching homework
 /view_homework – View today's homework
-/complete_task – Mark task as done
+/complete_task – Mark a task as done
 
 📌 Backlog & Syllabus
 /add_backlog – Add backlog tasks
@@ -225,14 +214,14 @@ async def start_day(update, context):
         f"`{b['start']}-{b['end']}` {b['description']} ({b['status']})" for b in plan
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
-    # Schedule reminders (simplified)
+    # Schedule reminders
     for b in plan:
         if b["type"] != "break":
             try:
-                start_dt = datetime.strptime(b["start"], "%H:%M").time()
+                start_time = datetime.strptime(b["start"], "%H:%M").time()
                 context.job_queue.run_daily(
                     lambda ctx, txt=f"⏰ Start: {b['description']} now!": ctx.bot.send_message(ctx.job.chat_id, text=txt),
-                    time=start_dt,
+                    time=start_time,
                     chat_id=update.effective_chat.id,
                     name=b["task_id"]
                 )
@@ -298,6 +287,10 @@ async def stats(update, context):
     avg = sum(prod)/len(prod) if prod else 0
     await update.message.reply_text(f"📊 Avg daily tasks completed: {avg:.1f}\nConsistency: {memory['stats']['consistency']}%")
 
+async def complete_task_cmd(update, context):
+    await update.message.reply_text("Send task ID (from /view_plan) or a part of the description.")
+    context.user_data['mode'] = 'complete'
+
 async def handle_message(update, context):
     text = update.message.text
     mode = context.user_data.get('mode')
@@ -310,7 +303,15 @@ async def handle_message(update, context):
         else:
             parts = text.split('|')
             if len(parts) >= 4:
-                task = {"subject": parts[0], "chapter": parts[1], "type": parts[2], "estimated_time": int(parts[3]), "source": "coaching", "status": "pending", "id": str(datetime.timestamp(datetime.now()))}
+                task = {
+                    "id": str(int(datetime.timestamp(datetime.now()))),
+                    "subject": parts[0],
+                    "chapter": parts[1],
+                    "type": parts[2],
+                    "estimated_time": int(parts[3]),
+                    "source": "coaching",
+                    "status": "pending"
+                }
                 context.user_data['temp'].append(task)
                 await update.message.reply_text(f"Added {task['subject']} - {task['chapter']}. Send next or 'done'.")
         return
@@ -324,7 +325,16 @@ async def handle_message(update, context):
         else:
             parts = text.split('|')
             if len(parts) >= 4:
-                task = {"id": str(datetime.timestamp(datetime.now())), "subject": parts[0], "chapter": parts[1], "type": parts[2], "estimated_time": int(parts[3]), "test_link": parts[4] if len(parts)>4 else "", "status": "pending", "source": "self"}
+                task = {
+                    "id": str(int(datetime.timestamp(datetime.now()))),
+                    "subject": parts[0],
+                    "chapter": parts[1],
+                    "type": parts[2],
+                    "estimated_time": int(parts[3]),
+                    "test_link": parts[4] if len(parts)>4 else "",
+                    "status": "pending",
+                    "source": "self"
+                }
                 context.user_data['temp'].append(task)
                 await update.message.reply_text("Added. Next or 'done'.")
         return
@@ -334,7 +344,12 @@ async def handle_message(update, context):
         else:
             parts = text.split('|')
             if len(parts) >= 2:
-                test = {"name": parts[0], "date": parts[1], "syllabus": [s.strip() for s in parts[2].split(',')] if len(parts)>2 else [], "importance": int(parts[3]) if len(parts)>3 else 5}
+                test = {
+                    "name": parts[0],
+                    "date": parts[1],
+                    "syllabus": [s.strip() for s in parts[2].split(',')] if len(parts)>2 else [],
+                    "importance": int(parts[3]) if len(parts)>3 else 5
+                }
                 memory["tests"]["upcoming"].append(test)
                 save_json("tests", memory["tests"])
                 context.user_data['mode'] = None
@@ -347,8 +362,8 @@ async def handle_message(update, context):
             memory["schedule"]["sleep"] = parts[1]
             memory["schedule"]["study_hours"] = int(parts[2])
             save_json("schedule", memory["schedule"])
-            await update.message.reply_text("Schedule updated.")
             context.user_data['mode'] = None
+            await update.message.reply_text("Schedule updated.")
         return
     elif mode == 'weekly':
         if text.lower() != 'skip':
@@ -370,15 +385,54 @@ async def handle_message(update, context):
                 await update.message.reply_text("Invalid chapter key. Check /view_syllabus.")
             context.user_data['mode'] = None
         return
+    elif mode == 'complete':
+        today = memory["today"]
+        found = False
+        for block in today.get("plan", []):
+            if text.lower() in block["task_id"].lower() or text.lower() in block["description"].lower():
+                block["status"] = "done"
+                found = True
+                memory["progress"]["logs"].append({
+                    "task_id": block["task_id"],
+                    "description": block["description"],
+                    "timestamp": datetime.now().isoformat()
+                })
+                save_json("progress", memory["progress"])
+                break
+        if found:
+            memory["today"] = today
+            save_json("today", memory["today"])
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            done_today = sum(1 for l in memory["progress"]["logs"] if l["timestamp"].startswith(today_str))
+            memory["stats"]["productivity"].append(done_today)
+            save_json("stats", memory["stats"])
+            await update.message.reply_text("✅ Task marked done. Great job!")
+        else:
+            await update.message.reply_text("Task not found. Check ID or description.")
+        context.user_data['mode'] = None
+        return
     # else: AI chat
     reply = ask_gemini(text)
     await update.message.reply_text(reply)
 
-async def complete_task_cmd(update, context):
-    await update.message.reply_text("Send task ID (from /view_plan) or part of description.")
-    context.user_data['mode'] = 'complete'
+# Autonomous check every 10 minutes
+async def autonomous_check(context):
+    today = memory["today"]
+    if not today.get("generated"):
+        return
+    now = datetime.now().strftime("%H:%M")
+    plan = today["plan"]
+    updated = False
+    for block in plan:
+        if block["status"] == "pending" and now > block["end"]:
+            block["status"] = "missed"
+            updated = True
+            await context.bot.send_message(chat_id=context.job.chat_id, text=f"⚠️ Missed: {block['description']} ({block['start']}-{block['end']})")
+    if updated:
+        memory["today"] = today
+        save_json("today", memory["today"])
 
-# Run a minimal HTTP server to keep Render alive
+# Simple HTTP server to keep Render awake
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -408,5 +462,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("complete_task", complete_task_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.job_queue.run_repeating(autonomous_check, interval=600, first=10)
     print("Bot polling...")
     app.run_polling()
