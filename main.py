@@ -550,7 +550,7 @@ Automatically at wake‑up time. I'll ask about sleep, study hours, tests, homew
 
 📎 PDF upload: Every Saturday I'll ask for your schedule PDF.
 """
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text)
 
 async def set_schedule_cmd(update, context):
     await update.message.reply_text("Send: `wake_up|sleep|study_hours`\nExample: `07:00|22:00|8`")
