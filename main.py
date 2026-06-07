@@ -7,22 +7,18 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import requests
 
-from google import genai
-
-# ---------- CONFIG ----------
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_KEY:
-    client = genai.Client(api_key=GEMINI_KEY)
-else:
-    client = None
+GROQ_KEY = os.getenv("GROQ_API_KEY")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama3-8b-8192"  # free, fast, excellent for coaching
 
-# ---------- MEMORY (JSON) ----------
 DATA_DIR = "/tmp/data" if os.getenv("RENDER") else "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 lock = threading.Lock()
 
+# ---------- memory functions (same as before) ----------
 def load_json(name, default):
     path = os.path.join(DATA_DIR, f"{name}.json")
     if not os.path.exists(path):
@@ -51,21 +47,17 @@ def init_syllabus():
                 chapters[key] = {"subject": sub, "chapter": ch, "class": cls, "status": "not_started", "priority": 5}
     return chapters
 
-def init_memory():
-    return {
-        "backlog": load_json("backlog", {"tasks": []}),
-        "today": load_json("today", {"date": "", "plan": [], "generated": False}),
-        "schedule": load_json("schedule", {"wake_up": "07:00", "sleep": "22:00", "study_hours": 8, "weekly_timetable": "", "last_updated": ""}),
-        "progress": load_json("progress", {"logs": []}),
-        "stats": load_json("stats", {"productivity": [], "consistency": 0, "fatigue_flags": 0}),
-        "syllabus": load_json("syllabus", {"chapters": init_syllabus()}),
-        "tests": load_json("tests", {"upcoming": [], "past": []}),
-        "homework": load_json("homework", {"date": "", "tasks": []}),
-    }
+memory = {
+    "backlog": load_json("backlog", {"tasks": []}),
+    "today": load_json("today", {"date": "", "plan": [], "generated": False}),
+    "schedule": load_json("schedule", {"wake_up": "07:00", "sleep": "22:00", "study_hours": 8, "weekly_timetable": "", "last_updated": ""}),
+    "progress": load_json("progress", {"logs": []}),
+    "stats": load_json("stats", {"productivity": [], "consistency": 0, "fatigue_flags": 0}),
+    "syllabus": load_json("syllabus", {"chapters": init_syllabus()}),
+    "tests": load_json("tests", {"upcoming": [], "past": []}),
+    "homework": load_json("homework", {"date": "", "tasks": []}),
+}
 
-memory = init_memory()
-
-# ---------- HELPERS ----------
 def get_weak_chapters():
     return [k for k,v in memory["syllabus"]["chapters"].items() if v["status"] in ("weak","revision_needed")]
 
@@ -141,12 +133,11 @@ def generate_plan():
     save_json("today", memory["today"])
     return plan
 
-# ---------- AI (Gemini) ----------
-def ask_gemini(prompt):
-    if not client:
-        return "AI not available. Please set GEMINI_API_KEY."
-    # Rate limit safeguard: wait 2 seconds before every request
-    time.sleep(2)
+# ---------- AI (Groq) ----------
+def ask_ai(prompt):
+    if not GROQ_KEY:
+        return "AI not available. Set GROQ_API_KEY."
+    time.sleep(1)  # gentle rate limit
     weak = get_weak_chapters()[:5]
     backlog_count = len([t for t in memory["backlog"]["tasks"] if t["status"] != "done"])
     tests = [t["name"] for t in memory["tests"]["upcoming"]]
@@ -158,26 +149,31 @@ Backlog tasks: {backlog_count}.
 Upcoming tests: {tests}.
 Today's plan: {'Generated' if memory['today']['generated'] else 'Not yet'}.
 """
-    system_instruction = """
-You are JEE Study OS. You are a strict Kota-style JEE coach AND a helpful ChatGPT assistant.
-When the user talks about academics (subjects, syllabus, backlogs, tests, study plans, problems), use the memory context above and answer like a demanding coach: motivate, push, suggest improvements, but NEVER overwrite the user's plan or data. Be data-driven.
-For non-academic questions, answer like a general assistant.
-Always reply in the same language as the user.
-"""
-    full_prompt = f"{system_instruction}\n\n{context}\nUser: {prompt}"
+    system_msg = "You are JEE Study OS, a strict Kota JEE coach + general assistant. Use the memory context. Be motivational, data-driven. Never overwrite user data. Reply in same language as user."
+    messages = [
+        {"role": "system", "content": system_msg + "\n\n" + context},
+        {"role": "user", "content": prompt}
+    ]
+    headers = {
+        "Authorization": f"Bearer {GROQ_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 500
+    }
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
-            contents=full_prompt
-        )
-        return response.text
+        resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        else:
+            return f"AI error: {resp.status_code} {resp.text}"
     except Exception as e:
-        err = str(e)
-        if "429" in err or "RESOURCE_EXHAUSTED" in err:
-            return "⏳ I’m a bit overloaded right now (free tier limit). Please wait a minute and try again. Your data is safe."
-        return f"AI error: {err}"
+        return f"AI error: {str(e)}"
 
-# ---------- BOT COMMANDS ----------
+# ---------- Telegram Handlers (all included, help_cmd fixed) ----------
 async def start(update, context):
     await update.message.reply_text("🚀 JEE Study OS ready! Send /help to see commands.")
 
@@ -220,7 +216,6 @@ async def start_day(update, context):
         f"`{b['start']}-{b['end']}` {b['description']} ({b['status']})" for b in plan
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
-    # Schedule reminders
     for b in plan:
         if b["type"] != "break":
             try:
@@ -417,11 +412,10 @@ async def handle_message(update, context):
             await update.message.reply_text("Task not found. Check ID or description.")
         context.user_data['mode'] = None
         return
-    # else: AI chat
-    reply = ask_gemini(text)
+    # AI chat
+    reply = ask_ai(text)
     await update.message.reply_text(reply)
 
-# Autonomous check every 10 minutes
 async def autonomous_check(context):
     today = memory["today"]
     if not today.get("generated"):
@@ -438,7 +432,6 @@ async def autonomous_check(context):
         memory["today"] = today
         save_json("today", memory["today"])
 
-# Simple HTTP server to keep Render awake
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -470,7 +463,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     if app.job_queue:
         app.job_queue.run_repeating(autonomous_check, interval=600, first=10)
-    else:
-        print("JobQueue not available – autonomous reminders disabled")
     print("Bot polling...")
     app.run_polling()
