@@ -209,7 +209,7 @@ async def help_cmd(update, context):
 
 🧠 General chat – Ask me anything!
 """
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text)
 
 async def start_day(update, context):
     plan = generate_plan()
