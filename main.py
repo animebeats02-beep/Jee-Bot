@@ -64,10 +64,10 @@ memory = {
     "syllabus": load_json("syllabus", {"chapters": init_syllabus()}),
     "tests": load_json("tests", {"upcoming": [], "past": []}),
     "homework": load_json("homework", {"date": "", "tasks": []}),
-    "chapter_exercises": load_json("chapter_exercises", {"exercises": {}}),  # key -> {O1: count, ...}
+    "chapter_exercises": load_json("chapter_exercises", {"exercises": {}}),
 }
 
-# ---------- default per-question times (minutes) ----------
+# ---------- exercise times ----------
 EXERCISE_TIMES = {
     "O1": 5,
     "O2": 7,
@@ -75,10 +75,9 @@ EXERCISE_TIMES = {
     "O4": 5,
     "JM": 5,
     "JA": 8,
-    "Gyanoday": 10,   # per section/page
+    "Gyanoday": 10,
 }
 
-# fixed maths counts
 MATHS_DEFAULTS = {"O1": 30, "O2": 20, "O3": 20, "O4": 10, "JM": 30, "JA": 20}
 
 # ---------- helpers ----------
@@ -89,7 +88,6 @@ def get_weak_chapters():
     return [k for k,v in memory["syllabus"]["chapters"].items() if v["status"] in ("weak","revision_needed")]
 
 def get_chapter_exercise_counts(chapter_key: str) -> Dict[str, int]:
-    """Return stored exercise counts for a chapter, or empty dict."""
     return memory["chapter_exercises"]["exercises"].get(chapter_key, {})
 
 def save_chapter_exercise_counts(chapter_key: str, counts: Dict[str, int]):
@@ -131,12 +129,11 @@ def estimate_backlog_days(daily_hours):
     return round(days, 1)
 
 def estimate_homework_time(task_description, exercise_counts: Dict[str, int]) -> int:
-    """Calculate total minutes from exercise counts using default per‑question times."""
     total = 0
     for ex_type, count in exercise_counts.items():
         time_per = EXERCISE_TIMES.get(ex_type, 3)
         total += count * time_per
-    return max(total, 10)   # minimum 10 min
+    return max(total, 10)
 
 def generate_plan(study_hours_override=None, skip_keywords=None,
                   test_chapters: List[str] = None, ongoing_chapters: List[str] = None):
@@ -199,7 +196,7 @@ def generate_plan(study_hours_override=None, skip_keywords=None,
     save_json("today", memory["today"])
     return plan
 
-# ---------- AI (Groq, /ask only) ----------
+# ---------- AI (Groq, only for /ask) ----------
 def ask_ai(prompt):
     if not GROQ_KEY:
         return "AI not available."
@@ -239,7 +236,7 @@ Today's plan: {'Generated' if memory['today']['generated'] else 'Not yet'}.
     except Exception as e:
         return f"AI error: {str(e)}"
 
-# ---------- morning check‑in state machine (extended) ----------
+# ---------- morning check‑in state machine ----------
 checkin_states: Dict[int, Dict[str, Any]] = {}
 
 async def start_morning_checkin(context: ContextTypes.DEFAULT_TYPE):
@@ -248,11 +245,11 @@ async def start_morning_checkin(context: ContextTypes.DEFAULT_TYPE):
         "state": "waiting_sleep",
         "sleep": None,
         "study_hours": None,
-        "homework": [],          # list of task dicts
+        "homework": [],
         "skip_keywords": [],
         "test_info": None,
         "test_11th_chapters": [],
-        "current_hw_chapter": None,  # when entering exercises
+        "current_hw_chapter": None,
         "pending_exercise_types": [],
         "current_exercise_counts": {}
     }
@@ -265,7 +262,6 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
     state = checkin_states[chat_id]
     text = update.message.text.strip()
 
-    # ---- basic info ----
     if state["state"] == "waiting_sleep":
         try:
             hours = float(text)
@@ -293,7 +289,7 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
             state["test_info"] = None
             state["state"] = "waiting_homework_start"
             await update.message.reply_text(
-                "📝 Let's add today's homework. For each chapter, send the chapter name like:\n`Physics|Rotation`\nOr type `done` when finished."
+                "📝 Let's add today's homework. For each chapter, send the chapter key like:\n`Physics_Rotation`\nOr type `done` when finished."
             )
         else:
             parts = text.split('|')
@@ -320,7 +316,6 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
         )
         return True
 
-    # ---- homework entry ----
     elif state["state"] == "waiting_homework_start":
         if text.lower() == "done":
             state["state"] = "waiting_skip_homework"
@@ -334,12 +329,10 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
                 "Send one or more keywords / task IDs (comma separated) or type `none`."
             )
         else:
-            # expecting chapter key like Physics_Rotation
             chapter_key = text.strip()
             if chapter_key in memory["syllabus"]["chapters"]:
                 subject = memory["syllabus"]["chapters"][chapter_key]["subject"]
                 state["current_hw_chapter"] = chapter_key
-                # prepare exercise type question
                 state["state"] = "waiting_exercise_types"
                 await update.message.reply_text(
                     f"📋 For **{subject} - {memory['syllabus']['chapters'][chapter_key]['chapter']}**, which exercise types do you have?\n"
@@ -352,7 +345,6 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
 
     elif state["state"] == "waiting_exercise_types":
         if text.lower() == "done":
-            # skip this chapter
             state["state"] = "waiting_homework_start"
             await update.message.reply_text("Chapter skipped. Send next chapter key or `done`.")
             return True
@@ -363,17 +355,14 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
             return True
         state["pending_exercise_types"] = valid_types
         state["current_exercise_counts"] = {}
-        # check if subject is Maths and use defaults if available
         chapter_key = state["current_hw_chapter"]
         subject = memory["syllabus"]["chapters"][chapter_key]["subject"]
         if subject == "Maths":
-            # auto-fill from MATHS_DEFAULTS for the types that match
             for ex in valid_types:
                 if ex in MATHS_DEFAULTS:
                     state["current_exercise_counts"][ex] = MATHS_DEFAULTS[ex]
                 else:
                     state["current_exercise_counts"][ex] = 0
-            # ask if we should adjust any
             await update.message.reply_text(
                 f"🔢 For Maths, default counts are:\n" +
                 "\n".join(f"{k}: {v}" for k,v in state["current_exercise_counts"].items()) +
@@ -381,20 +370,16 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
             )
             state["state"] = "waiting_exercise_counts"
         else:
-            # ask for counts one by one
             current_type = valid_types[0]
             state["state"] = "waiting_exercise_counts"
-            state["pending_exercise_types"] = valid_types
             await update.message.reply_text(f"How many questions in **{current_type}**? (send a number)")
         return True
 
     elif state["state"] == "waiting_exercise_counts":
         if text.lower() == "ok" or text.lower() == "done":
-            # finalize this chapter
             chapter_key = state["current_hw_chapter"]
             save_chapter_exercise_counts(chapter_key, state["current_exercise_counts"])
             total_time = estimate_homework_time("", state["current_exercise_counts"])
-            # add a homework task for this chapter with combined effort
             task = {
                 "id": str(int(datetime.timestamp(datetime.now()))),
                 "subject": memory["syllabus"]["chapters"][chapter_key]["subject"],
@@ -407,12 +392,10 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
                 "exercise_counts": state["current_exercise_counts"]
             }
             state["homework"].append(task)
-            # back to entering next chapter
             state["state"] = "waiting_homework_start"
             await update.message.reply_text(f"✅ Added homework for {task['subject']} - {task['chapter']} (est. {total_time} min). Next chapter key or `done`.")
             return True
 
-        # if we are in Maths default mode, user may send adjustments like O2=25
         if "=" in text:
             parts = text.split("=")
             ex_type = parts[0].strip()
@@ -427,17 +410,14 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
                 await update.message.reply_text("Invalid number. Use format `O2=25`.")
             return True
 
-        # regular count entry (non-maths)
         try:
             count = int(text)
-            # find the next type that hasn't been filled
             remaining_types = [t for t in state["pending_exercise_types"] if t not in state["current_exercise_counts"]]
             if not remaining_types:
                 await update.message.reply_text("All types have counts. Reply `ok` to finalize.")
                 return True
             current_type = remaining_types[0]
             state["current_exercise_counts"][current_type] = count
-            # ask for next
             next_types = [t for t in state["pending_exercise_types"] if t not in state["current_exercise_counts"]]
             if next_types:
                 await update.message.reply_text(f"How many questions in **{next_types[0]}**? (send a number)")
@@ -448,24 +428,18 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("Please enter a number, or `ok` to finish.")
             return True
 
-    # ---- skip homework ----
     elif state["state"] == "waiting_skip_homework":
         if text.lower() == "none":
             state["skip_keywords"] = []
         else:
             state["skip_keywords"] = [kw.strip() for kw in text.split(",") if kw.strip()]
-        # finalize
         state["state"] = "finalize"
-        return await handle_checkin_message(update, context)   # jump to finalize
+        return await handle_checkin_message(update, context)
 
-    # ---- finalize (plan generation) ----
     if state["state"] == "finalize":
         await update.message.reply_text("✅ Check‑in complete! Generating your personalised plan...")
-        # 1. Save homework (all entered)
         memory["homework"] = {"date": datetime.now().strftime("%Y-%m-%d"), "tasks": state["homework"]}
         save_json("homework", memory["homework"])
-
-        # 2. Test handling
         test_chapters_for_plan = []
         ongoing_now = get_ongoing_chapters()
         if state["test_info"]:
@@ -481,27 +455,19 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
             memory["tests"]["upcoming"].append(test_entry)
             save_json("tests", memory["tests"])
             test_chapters_for_plan = test_syllabus
-
-        # 3. Generate plan
         plan = generate_plan(
             study_hours_override=state["study_hours"],
             skip_keywords=state["skip_keywords"],
             test_chapters=test_chapters_for_plan,
             ongoing_chapters=ongoing_now
         )
-
-        # 4. Backlog estimate
         daily_hrs = state["study_hours"] if state["study_hours"] else memory["schedule"]["study_hours"]
         days = estimate_backlog_days(daily_hrs)
-
-        # 5. Send plan
         plan_msg = "📅 *Your Daily Plan*\n" + "\n".join(
             f"`{b['start']}-{b['end']}` {b['description']} ({b['status']})" for b in plan
         )
         plan_msg += f"\n\n⏳ *Backlog estimate:* At {daily_hrs}h/day, you'll clear all pending backlog in ~{days} day(s)."
         await update.message.reply_text(plan_msg, parse_mode='Markdown')
-
-        # 6. Reminders
         for b in plan:
             if b["type"] != "break":
                 try:
@@ -513,17 +479,14 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
                         name=b["task_id"]
                     )
                 except: pass
-
         del checkin_states[chat_id]
         return True
-
     return False
 
-# ---------- PDF upload for weekly schedule ----------
+# ---------- PDF upload ----------
 async def weekly_schedule_prompt(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
-    await context.bot.send_message(chat_id, "📅 It's Saturday! Please upload your class schedule PDF for batch CETQAS. I'll try to extract your weekly timetable.")
-    # set a flag to expect PDF
+    await context.bot.send_message(chat_id, "📅 It's Saturday! Please upload your class schedule PDF for batch CETQAS.")
     context.bot_data.setdefault("expecting_pdf", {})
     context.bot_data["expecting_pdf"][chat_id] = True
 
@@ -535,7 +498,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file = await context.bot.get_file(doc.file_id)
             file_path = f"/tmp/{chat_id}_schedule.pdf"
             await file.download_to_drive(file_path)
-            # extract text
             text = ""
             if PDF_SUPPORT:
                 try:
@@ -543,31 +505,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reader = PyPDF2.PdfReader(f)
                         for page in reader.pages:
                             text += page.extract_text() or ""
-                except:
-                    text = ""
+                except: pass
             if "CETQAS" in text:
-                # Try to parse days and times (simplified)
                 lines = text.split('\n')
-                timetable = []
-                for line in lines:
-                    if any(day in line for day in ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]):
-                        timetable.append(line.strip())
+                timetable = [line.strip() for line in lines if any(day in line for day in ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"])]
                 if timetable:
                     memory["schedule"]["weekly_timetable"] = "\n".join(timetable)
                     save_json("schedule", memory["schedule"])
                     await update.message.reply_text("✅ Timetable extracted and saved.")
                 else:
-                    await update.message.reply_text("Found CETQAS but couldn't parse timetable. Please use /week_update to enter it manually.")
+                    await update.message.reply_text("Found CETQAS but couldn't parse timetable. Use /week_update.")
             else:
-                await update.message.reply_text("Could not find CETQAS in the PDF. Please use /week_update to enter manually.")
-            # clean up
+                await update.message.reply_text("Could not find CETQAS in the PDF. Use /week_update.")
             os.remove(file_path)
         else:
             await update.message.reply_text("Please send a PDF file.")
-        # reset flag
         context.bot_data["expecting_pdf"][chat_id] = False
 
-# ---------- Telegram commands (most unchanged) ----------
+# ---------- Telegram commands ----------
 async def start(update, context):
     await update.message.reply_text("🚀 JEE Study OS ready! Use /help for commands. I'll wake you up at your scheduled time.")
 
@@ -689,18 +644,20 @@ async def view_plan(update, context):
     msg = "📅 *Today's Plan*\n" + "\n".join(
         f"`{b['start']}-{b['end']}` {b['description']} [{b['status']}]" for b in today["plan"]
     )
-    await update.message.reply_text(msg)
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 # ---------- message router ----------
 async def handle_message(update, context):
-    # check-in flow first
+    # Safety: if it's a command, let the CommandHandler handle it
+    if update.message.text.startswith('/'):
+        return
+    # check-in flow
     if await handle_checkin_message(update, context):
         return
-    # then PDF mode
+    # PDF mode
     if context.bot_data.get("expecting_pdf", {}).get(update.effective_chat.id):
         await handle_document(update, context)
         return
-    # then input modes
     mode = context.user_data.get('mode')
     text = update.message.text
     if mode == 'backlog':
@@ -805,10 +762,10 @@ async def handle_message(update, context):
             await update.message.reply_text("Task not found. Check ID or description.")
         context.user_data['mode'] = None
         return
-    # No active mode → reject casual chat
+    # No active mode → coach mode rejection
     await update.message.reply_text("I'm in coach mode. Use /help to see commands, or wait for your morning check‑in. If you need AI assistance, try /ask <question>.")
 
-# ---------- autonomous missed task checker ----------
+# ---------- autonomous check ----------
 async def autonomous_check(context):
     today = memory["today"]
     if not today.get("generated"):
@@ -835,11 +792,10 @@ def schedule_morning_checkin(job_queue, wake_up_str, chat_id):
     )
 
 def schedule_weekly_pdf_prompt(job_queue, chat_id):
-    """Ask for PDF every Saturday 8 AM."""
     job_queue.run_daily(
         weekly_schedule_prompt,
         time=datetime.strptime("08:00", "%H:%M").time(),
-        days=(5,),  # Saturday (Monday=0)
+        days=(5,),
         chat_id=chat_id,
         name="weekly_pdf_prompt"
     )
@@ -878,6 +834,6 @@ if __name__ == "__main__":
         app.job_queue.run_repeating(autonomous_check, interval=600, first=10)
         schedule = memory["schedule"]
         schedule_morning_checkin(app.job_queue, schedule["wake_up"], None)
-        schedule_weekly_pdf_prompt(app.job_queue, None)  # will need a chat_id; we use None for now and rely on job context
+        schedule_weekly_pdf_prompt(app.job_queue, None)
     print("Bot polling...")
     app.run_polling()
