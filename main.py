@@ -91,7 +91,7 @@ def init_syllabus():
 
 memory = {
     "backlog": load_json("backlog", {"tasks": []}),
-    "today": load_json("today", {"date": "", "plan": [], "generated": False}),
+    "today": load_json("today", {"date": "", "todo": [], "generated": False}),  # changed "plan" to "todo"
     "schedule": load_json("schedule", {"wake_up": "07:00", "sleep": "22:00", "study_hours": 8,
                                        "weekly_timetable": "", "last_updated": "",
                                        "notifications": {"enabled": True, "interval_minutes": 120}}),
@@ -115,7 +115,6 @@ memory = {
 
 RECOMMENDED_SLEEP = 7.5
 EXERCISE_TIMES = {"O1":5,"O2":7,"O3":7,"O4":5,"JM":5,"JA":8,"Gyanoday":10}
-MATHS_DEFAULTS = {"O1":30,"O2":20,"O3":20,"O4":10,"JM":30,"JA":20}
 MOTIVATIONAL_QUOTES = [
     "“Success is no accident. It is hard work, perseverance, learning, studying, sacrifice and most of all, love of what you are doing.” – Pelé",
     "“Don't watch the clock; do what it does. Keep going.” – Sam Levenson",
@@ -127,7 +126,7 @@ MOTIVATIONAL_QUOTES = [
     "“You don't have to be great to start, but you have to start to be great.” – Zig Ziglar",
 ]
 
-# ---------- helpers (same as original, shortened for brevity) ----------
+# ---------- helpers ----------
 def get_ongoing_chapters():
     return [k for k,v in memory["syllabus"]["chapters"].items() if v["status"] == "going_on"]
 
@@ -273,53 +272,57 @@ def generate_smart_revision_tasks(remaining_minutes):
 
 def generate_todo_list(study_hours_override=None, skip_keywords=None,
                        test_chapters=None, ongoing_chapters=None):
-    study_mins = (study_hours_override if study_hours_override else memory["schedule"]["study_hours"]) * 60
-    hw = memory["homework"]["tasks"] if memory["homework"]["date"] == datetime.now().strftime("%Y-%m-%d") else []
-    backlog = [t for t in memory["backlog"]["tasks"] if t["status"]!="done"]
-    if skip_keywords:
-        backlog = [t for t in backlog if not should_skip_task(t, skip_keywords)]
-    if test_chapters is None: test_chapters = []
-    if ongoing_chapters is None: ongoing_chapters = get_ongoing_chapters()
+    try:
+        study_mins = (study_hours_override if study_hours_override else memory["schedule"]["study_hours"]) * 60
+        hw = memory["homework"]["tasks"] if memory["homework"]["date"] == datetime.now().strftime("%Y-%m-%d") else []
+        backlog = [t for t in memory["backlog"]["tasks"] if t["status"]!="done"]
+        if skip_keywords:
+            backlog = [t for t in backlog if not should_skip_task(t, skip_keywords)]
+        if test_chapters is None: test_chapters = []
+        if ongoing_chapters is None: ongoing_chapters = get_ongoing_chapters()
 
-    revision_11th = generate_revision_tasks_for_11th()
-    all_mandatory = revision_11th + hw + backlog
-    for t in all_mandatory:
-        t["priority_score"] = compute_priority(t, test_chapters, ongoing_chapters)
-    all_mandatory.sort(key=lambda x: x["priority_score"], reverse=True)
+        revision_11th = generate_revision_tasks_for_11th()
+        all_mandatory = revision_11th + hw + backlog
+        for t in all_mandatory:
+            t["priority_score"] = compute_priority(t, test_chapters, ongoing_chapters)
+        all_mandatory.sort(key=lambda x: x["priority_score"], reverse=True)
 
-    total_mandatory_min = sum(t["estimated_time"] for t in all_mandatory)
-    remaining = study_mins - total_mandatory_min
-    smart_rev = []
-    if remaining > 30:
-        smart_rev = generate_smart_revision_tasks(remaining)
+        total_mandatory_min = sum(t["estimated_time"] for t in all_mandatory)
+        remaining = study_mins - total_mandatory_min
+        smart_rev = []
+        if remaining > 30:
+            smart_rev = generate_smart_revision_tasks(remaining)
 
-    full_list = all_mandatory + smart_rev
-    total_min = sum(t["estimated_time"] for t in full_list)
-
-    overflow_tasks = []
-    if total_min > study_mins:
-        full_list.sort(key=lambda x: x["priority_score"])
-        while full_list and sum(t["estimated_time"] for t in full_list) > study_mins:
-            removed = full_list.pop(0)
-            overflow_tasks.append(removed)
-        if overflow_tasks:
-            for task in overflow_tasks:
-                task["status"] = "pending"
-                task["source"] = task.get("source", "overflow")
-                task["id"] = f"overflow_{task.get('id','')}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                memory["backlog"]["tasks"].append(task)
-            save_json("backlog", memory["backlog"])
+        full_list = all_mandatory + smart_rev
         total_min = sum(t["estimated_time"] for t in full_list)
-        full_list.sort(key=lambda x: x["priority_score"], reverse=True)
 
-    memory["today"] = {"date": datetime.now().strftime("%Y-%m-%d"), "todo": full_list, "generated": True}
-    save_json("today", memory["today"])
-    return full_list, total_min, study_mins, overflow_tasks
+        overflow_tasks = []
+        if total_min > study_mins:
+            full_list.sort(key=lambda x: x["priority_score"])
+            while full_list and sum(t["estimated_time"] for t in full_list) > study_mins:
+                removed = full_list.pop(0)
+                overflow_tasks.append(removed)
+            if overflow_tasks:
+                for task in overflow_tasks:
+                    task["status"] = "pending"
+                    task["source"] = task.get("source", "overflow")
+                    task["id"] = f"overflow_{task.get('id','')}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                    memory["backlog"]["tasks"].append(task)
+                save_json("backlog", memory["backlog"])
+            total_min = sum(t["estimated_time"] for t in full_list)
+            full_list.sort(key=lambda x: x["priority_score"], reverse=True)
 
-# ---------- AI helpers ----------
+        memory["today"] = {"date": datetime.now().strftime("%Y-%m-%d"), "todo": full_list, "generated": True}
+        save_json("today", memory["today"])
+        return full_list, total_min, study_mins, overflow_tasks
+    except Exception as e:
+        print(f"Error in generate_todo_list: {e}")
+        raise
+
+# ---------- AI helpers (no sleep, added typing) ----------
 def ask_ai(prompt, chat_history=None):
     if not GROQ_KEY: return "AI not available."
-    time.sleep(1)
+    # Removed time.sleep(1) for instant response
     weak = get_weak_chapters()[:5]
     backlog_count = len([t for t in memory["backlog"]["tasks"] if t["status"]!="done"])
     tests = [t["name"] for t in memory["tests"]["upcoming"]]
@@ -497,68 +500,77 @@ async def handle_daily_checkin_message(update: Update, context: ContextTypes.DEF
 async def finalize_daily_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     state = daily_states.pop(chat_id, None)
-    if not state: return
+    if not state:
+        await update.message.reply_text("❌ Session expired. Please use /start_day again.")
+        return
 
-    sleep_msg = ""
-    if state["sleep"] is not None:
-        diff = state["sleep"] - RECOMMENDED_SLEEP
-        if diff >= 1:
-            sleep_msg = f"You slept {state['sleep']}h — well rested! (+{diff:.1f}h vs recommended)."
-        elif diff <= -1:
-            sleep_msg = f"You slept {state['sleep']}h — less than the recommended {RECOMMENDED_SLEEP}h."
-        else:
-            sleep_msg = f"You slept {state['sleep']}h — adequate."
-
-    memory["homework"] = {"date": datetime.now().strftime("%Y-%m-%d"), "tasks": state["homework"]}
-    save_json("homework", memory["homework"])
-
-    study_hours = state["study_hours"] if state["study_hours"] else memory["schedule"]["study_hours"]
-    todo, total_est, avail_mins, overflow = generate_todo_list(
-        study_hours_override=study_hours,
-        skip_keywords=state["skip_keywords"]
-    )
-    daily_hrs = study_hours
-    days = estimate_backlog_days(daily_hrs)
-
-    update_streak_and_hours(daily_hrs, mood=state["mood"], sleep_hours=state["sleep"])
-
-    wake = state["wake_time"] or memory["schedule"]["wake_up"]
     try:
-        wake_dt = datetime.strptime(wake, "%H:%M")
-        wake_hours = wake_dt.hour + wake_dt.minute/60
-    except:
-        wake_hours = 7.0
-    sleep_time_str = memory["schedule"]["sleep"]
-    try:
-        sleep_dt = datetime.strptime(sleep_time_str, "%H:%M")
-        sleep_hours_val = sleep_dt.hour + sleep_dt.minute/60
-    except:
-        sleep_hours_val = 22.0
-    morning_hours = max(0, 12 - wake_hours)
-    evening_hours = max(0, sleep_hours_val - 20)
-    total_free = round(morning_hours + evening_hours, 1)
+        # Show typing indicator while generating plan
+        await context.bot.send_chat_action(chat_id, action="typing")
 
-    def emoji(score):
-        if score >= 80: return "🔴"
-        if score >= 60: return "🟠"
-        if score >= 40: return "🟡"
-        return "🟢"
+        sleep_msg = ""
+        if state["sleep"] is not None:
+            diff = state["sleep"] - RECOMMENDED_SLEEP
+            if diff >= 1:
+                sleep_msg = f"You slept {state['sleep']}h — well rested! (+{diff:.1f}h vs recommended)."
+            elif diff <= -1:
+                sleep_msg = f"You slept {state['sleep']}h — less than the recommended {RECOMMENDED_SLEEP}h."
+            else:
+                sleep_msg = f"You slept {state['sleep']}h — adequate."
 
-    msg = f"{sleep_msg}\n\n📅 *Today's To‑Do List* (Classes: 12 PM – 8 PM)\n"
-    msg += f"🕒 Free hours: ~{total_free}h (morning {morning_hours}h + evening {evening_hours}h)\n"
-    msg += f"⏱️ Total task time: {total_est} min ({total_est/60:.1f}h)\n"
-    if total_est > avail_mins:
-        msg += "⚠️ Task time exceeds available study time.\n"
-    if overflow:
-        msg += "📦 The following tasks were moved to backlog to fit your day:\n"
-        for t in overflow:
-            msg += f"• {t['subject']} - {t['chapter']} ({t['type']})\n"
-    msg += "\n"
-    for task in todo:
-        msg += f"{emoji(task.get('priority_score',50))} {task['subject']} - {task['chapter']} ({task['type']}) – {task['estimated_time']} min\n"
-    msg += f"\n⏳ *Backlog estimate:* ~{days} day(s) at {daily_hrs}h/day."
+        memory["homework"] = {"date": datetime.now().strftime("%Y-%m-%d"), "tasks": state["homework"]}
+        save_json("homework", memory["homework"])
 
-    await update.message.reply_text(msg, parse_mode='Markdown')
+        study_hours = state["study_hours"] if state["study_hours"] else memory["schedule"]["study_hours"]
+        todo, total_est, avail_mins, overflow = generate_todo_list(
+            study_hours_override=study_hours,
+            skip_keywords=state["skip_keywords"]
+        )
+        daily_hrs = study_hours
+        days = estimate_backlog_days(daily_hrs)
+
+        update_streak_and_hours(daily_hrs, mood=state["mood"], sleep_hours=state["sleep"])
+
+        wake = state["wake_time"] or memory["schedule"]["wake_up"]
+        try:
+            wake_dt = datetime.strptime(wake, "%H:%M")
+            wake_hours = wake_dt.hour + wake_dt.minute/60
+        except:
+            wake_hours = 7.0
+        sleep_time_str = memory["schedule"]["sleep"]
+        try:
+            sleep_dt = datetime.strptime(sleep_time_str, "%H:%M")
+            sleep_hours_val = sleep_dt.hour + sleep_dt.minute/60
+        except:
+            sleep_hours_val = 22.0
+        morning_hours = max(0, 12 - wake_hours)
+        evening_hours = max(0, sleep_hours_val - 20)
+        total_free = round(morning_hours + evening_hours, 1)
+
+        def emoji(score):
+            if score >= 80: return "🔴"
+            if score >= 60: return "🟠"
+            if score >= 40: return "🟡"
+            return "🟢"
+
+        msg = f"{sleep_msg}\n\n📅 *Today's To‑Do List* (Classes: 12 PM – 8 PM)\n"
+        msg += f"🕒 Free hours: ~{total_free}h (morning {morning_hours}h + evening {evening_hours}h)\n"
+        msg += f"⏱️ Total task time: {total_est} min ({total_est/60:.1f}h)\n"
+        if total_est > avail_mins:
+            msg += "⚠️ Task time exceeds available study time.\n"
+        if overflow:
+            msg += "📦 The following tasks were moved to backlog to fit your day:\n"
+            for t in overflow:
+                msg += f"• {t['subject']} - {t['chapter']} ({t['type']})\n"
+        msg += "\n"
+        for task in todo:
+            msg += f"{emoji(task.get('priority_score',50))} {task['subject']} - {task['chapter']} ({task['type']}) – {task['estimated_time']} min\n"
+        msg += f"\n⏳ *Backlog estimate:* ~{days} day(s) at {daily_hrs}h/day."
+
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    except Exception as e:
+        print(f"Error finalizing check-in: {e}")
+        await update.message.reply_text("❌ Error generating plan. Please try /start_day again. If the problem persists, contact support.")
 
 # ---------- Test management ----------
 def schedule_test_followups(app):
@@ -590,44 +602,36 @@ async def ask_next_test_info(context):
             "📅 Please set your next monthly test.\nSend: `Test Date (YYYY-MM-DD) | 11th Chapter Keys (comma separated)`")
 
 # ---------- Enhanced Natural Language Understanding ----------
-# Rule-based answers for common queries (fast path)
 def get_answer_from_memory(query_lower: str) -> str | None:
-    # Sleep/wake schedule
     if re.search(r"(what|show|tell).* (sleep|wake).*schedule", query_lower):
         sched = memory["schedule"]
         return (f"Your schedule: wake up at {sched['wake_up']}, sleep at {sched['sleep']}. "
                 f"Target study hours: {sched['study_hours']}h/day.")
-    # Today's plan
     if re.search(r"(what|show|tell).* (today'?s plan|todo|to-do|tasks? for today)", query_lower):
         todo = memory["today"].get("todo", [])
         if not todo:
             return "Today's plan not generated yet. Use /start_day or wait for morning check-in."
         lines = [f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in todo[:10]]
         return "📅 Today's To‑Do:\n" + "\n".join(lines)
-    # Backlog
     if re.search(r"(what|show|tell).*backlog", query_lower):
         tasks = [t for t in memory["backlog"]["tasks"] if t["status"] != "done"]
         if not tasks:
             return "No pending backlog tasks."
         return "📋 Backlog:\n" + "\n".join(f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in tasks[:10])
-    # Weak chapters
     if re.search(r"(weak|difficult).* chapters?", query_lower):
         weak = get_weak_chapters()
         if not weak:
             return "No weak chapters reported."
         return f"⚠️ Weak chapters: {', '.join(weak[:5])}."
-    # Streak
     if re.search(r"(streak|how many days in a row|current streak)", query_lower):
         s = memory["stats"]
         return f"🔥 Current streak: {s.get('streak',0)} days. Best: {s.get('longest_streak',0)} days."
-    # Weekly timetable
     if re.search(r"(timetable|weekly schedule|class schedule)", query_lower):
         tt = memory["schedule"].get("weekly_timetable")
         if tt:
             return f"📅 Weekly timetable:\n{tt[:400]}"
         else:
             return "No timetable saved. Use /week_update to set it."
-    # Next test
     if re.search(r"(next test|upcoming test|test date)", query_lower):
         next_test = memory["tests"].get("next_test_date")
         if next_test:
@@ -636,7 +640,6 @@ def get_answer_from_memory(query_lower: str) -> str | None:
             return "No upcoming test set. Use /set_test."
     return None
 
-# AI-based intent interpretation for everything else (informal, typos, complex)
 def interpret_with_ai(text: str) -> dict:
     context = f"""
 Current memory:
@@ -674,17 +677,14 @@ Memory context: {context}
 """
     try:
         resp = ask_ai(prompt)
-        # Find JSON in the response (may have extra text)
         json_match = re.search(r'\{.*\}', resp, re.DOTALL)
         if json_match:
             return json.loads(json_match.group(0))
     except Exception as e:
         print(f"AI intent error: {e}")
-    # Fallback
     return {"intent": "chat", "entity_type": "none", "value": None, "response": "I didn't understand that. Try using /help or rephrase."}
 
 async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Process any non-command, non-mode message. Returns True if handled."""
     text = update.message.text
     text_lower = text.lower()
 
@@ -694,7 +694,9 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(answer)
         return True
 
-    # Otherwise use AI to interpret intent
+    # Show typing indicator for AI processing
+    await context.bot.send_chat_action(update.effective_chat.id, action="typing")
+
     intent_data = interpret_with_ai(text)
     intent = intent_data.get("intent")
     entity = intent_data.get("entity_type")
@@ -704,13 +706,10 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
     if intent == "query":
         await update.message.reply_text(response)
         return True
-
     elif intent == "update":
-        # Perform the update
         if entity == "sleep":
             try:
                 hours = float(value)
-                # Store as last_sleep_hours for future reference (not used in schedule but can be queried)
                 memory["schedule"]["last_sleep_hours"] = hours
                 save_json("schedule", memory["schedule"])
                 await update.message.reply_text(f"Got it. Your sleep last night: {hours} hours. Recommended: {RECOMMENDED_SLEEP}h.")
@@ -783,15 +782,11 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
             except:
                 await update.message.reply_text("Please send a number for mood (1-10).")
         else:
-            # Fallback: just reply with the AI-generated response (which may be a confirmation or error)
             await update.message.reply_text(response or "Update done.")
         return True
-
     elif intent == "chat":
         await update.message.reply_text(response)
         return True
-
-    # If we reach here, nothing handled
     return False
 
 # ---------- Periodic notifications ----------
@@ -998,6 +993,7 @@ async def ask_cmd(update, context):
     if not question:
         await update.message.reply_text("Usage: /ask <your question>")
         return
+    await context.bot.send_chat_action(update.effective_chat.id, action="typing")
     reply = ask_ai(question)
     await update.message.reply_text(reply)
 
@@ -1011,6 +1007,9 @@ async def view_plan(update, context):
         await update.message.reply_text("No to‑do list yet. Use /start_day or morning check‑in.")
         return
     todo = today.get("todo", [])
+    if not todo:
+        await update.message.reply_text("No tasks for today. Great! Relax or revise weak topics.")
+        return
     msg = "📅 *Today's To‑Do*\n" + "\n".join(
         f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in todo
     )
@@ -1123,6 +1122,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text.startswith('/'):
         return
     if context.user_data.get('mode') == 'chat':
+        await context.bot.send_chat_action(chat_id, action="typing")
         history = context.user_data.get('chat_history', [])
         user_msg = update.message.text
         history.append({"role":"user","content": user_msg})
@@ -1212,27 +1212,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['mode'] = None
         return
     elif mode == 'complete':
-        today = memory["today"]
+        today_plan = memory["today"].get("todo", [])
         found = False
-        for task in today.get("todo", []):
-            if text.lower() in task.get("id","").lower() or text.lower() in task.get("description","").lower():
+        for task in today_plan:
+            if text.lower() in task.get("id","").lower() or text.lower() in task.get("chapter","").lower():
                 task["status"] = "done"
                 found = True
                 memory["progress"]["logs"].append({
-                    "task_id": task["id"], "description": task.get("description",""),
+                    "task_id": task["id"], "description": f"{task['subject']} - {task['chapter']}",
                     "timestamp": datetime.now().isoformat()
                 })
                 save_json("progress", memory["progress"])
                 break
         if found:
-            memory["today"] = today
+            memory["today"]["todo"] = today_plan
             save_json("today", memory["today"])
             done_today = sum(1 for l in memory["progress"]["logs"] if l["timestamp"].startswith(datetime.now().strftime("%Y-%m-%d")))
-            memory["stats"]["productivity"].append(done_today)
-            save_json("stats", memory["stats"])
-            await update.message.reply_text("✅ Task marked done.")
+            await update.message.reply_text(f"✅ Task marked done. You've completed {done_today} task(s) today.")
         else:
-            await update.message.reply_text("Task not found.")
+            await update.message.reply_text("Task not found. Use /view_plan to see task IDs or chapters.")
         context.user_data['mode'] = None
         return
 
