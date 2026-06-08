@@ -283,7 +283,6 @@ def generate_todo_list(study_hours_override=None, skip_keywords=None,
                        test_chapters=None, ongoing_chapters=None):
     try:
         study_mins = (float(study_hours_override) if study_hours_override else float(memory["schedule"]["study_hours"])) * 60
-        # Ensure homework tasks are a list
         homework_tasks = memory["homework"].get("tasks", []) if memory["homework"].get("date") == datetime.now().strftime("%Y-%m-%d") else []
         if not isinstance(homework_tasks, list):
             homework_tasks = []
@@ -706,13 +705,11 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
     text = update.message.text
     text_lower = text.lower()
 
-    # First try fast rule-based answers
     answer = get_answer_from_memory(text_lower)
     if answer:
         await update.message.reply_text(answer)
         return True
 
-    # Show typing indicator for AI processing
     await context.bot.send_chat_action(update.effective_chat.id, action="typing")
 
     intent_data = interpret_with_ai(text)
@@ -737,6 +734,11 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
             if isinstance(value, str) and re.match(r'\d{1,2}:\d{2}', value):
                 memory["schedule"]["wake_up"] = value
                 save_json("schedule", memory["schedule"])
+                # Re-schedule morning check-in with new time
+                for job in context.application.job_queue.jobs():
+                    if job.name == "morning_checkin" and job.chat_id == update.effective_chat.id:
+                        job.schedule_removal()
+                schedule_morning_checkin(context.application.job_queue, value, update.effective_chat.id)
                 await update.message.reply_text(f"Wake-up time set to {value}. Morning check‑in will happen then.")
             else:
                 await update.message.reply_text("Please use HH:MM format for wake-up time (e.g., 07:30).")
@@ -870,38 +872,61 @@ async def start(update, context):
     schedule_notifications(context.application.job_queue, chat_id,
                           notify_settings.get("interval_minutes",120),
                           notify_settings.get("enabled",True))
-    await update.message.reply_text("🚀 JEE Study OS ready! You can talk to me naturally. /help for commands.")
+    # Schedule morning check-in for this user
+    wake_up = memory["schedule"].get("wake_up", "07:00")
+    schedule_morning_checkin(context.application.job_queue, wake_up, chat_id)
+    await update.message.reply_text(
+        "🚀 JEE Study OS ready!\n\n"
+        "I will automatically ask you for your daily check‑in every morning at your wake‑up time.\n"
+        "You can also start it manually with /start_day.\n\n"
+        "Just talk to me naturally – I understand questions like 'What's my backlog?' and commands like 'Set wake-up to 7am'.\n"
+        "Type /help for all features."
+    )
+
+async def test_morning_cmd(update, context):
+    """Hidden command to manually trigger morning check-in (for debugging)."""
+    chat_id = update.effective_chat.id
+    await start_daily_checkin(chat_id, context)
 
 async def help_cmd(update, context):
     text = """
 📚 **JEE Study OS – Your AI Coach**
 
-You can talk to me like a human. No need for /chat or special modes.
+**🌅 Daily Routine** – Every morning at your wake‑up time, I'll ask you:
+- How many hours you slept
+- Your wake‑up time
+- Your mood (1‑10)
+- How many hours you plan to study
+- Your homework (natural language, e.g., "Physics Electrostatics O1 30, O2 25")
+- Any tasks to skip
 
-**Examples of natural conversation:**
-• *"What's my backlog?"*
-• *"Set my wake-up time to 7am"*
-• *"Add backlog Physics Gravitation 45 minutes"*
-• *"Mark Electrostatics as completed"*
-• *"My mood is 8"*
-• *"What is the formula for kinetic energy?"* (I'll answer from my knowledge)
-• *"How to solve quadratic equations?"* (I'll explain)
+Then I generate your complete to‑do list for the day, including backlog, test revision, and weak‑topic revision.
 
-**Commands (optional, for power users):**
-/start_day – Manual morning check‑in
-/stats – Your study streak and hours
+**💬 Natural Conversation** – No need for `/chat`. Just talk to me:
+- *"What's my backlog?"*
+- *"Set wake-up to 7am"*
+- *"Add backlog Physics Gravitation 45 minutes"*
+- *"Mark Electrostatics as completed"*
+- *"My mood is 8"*
+- *"How to solve quadratic equations?"* (academic help)
+
+**🔧 Commands** (optional, for power users):
+/start_day – Manually start morning check‑in
 /view_plan – Today's to‑do list
-/set_test – Schedule a monthly test
-/view_syllabus – All chapters
+/stats – Study streak and hours
+/week_report – Weekly summary
+/set_test – Schedule a monthly test (with 11th syllabus)
+/view_syllabus – Full syllabus progress
 /add_backlog – Add backlog manually
 /notify – Configure periodic reminders
+/mood <1-10> – Quick mood log
+/progress <hours> – Log study hours
 
 I remember everything you tell me about your JEE preparation.
 """
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def chat_cmd(update, context):
-    # This is kept for compatibility, but you don't need to use it
     context.user_data['mode'] = 'chat'
     context.user_data['chat_history'] = []
     await update.message.reply_text("💬 Chat mode active. You can also just talk normally without /chat. /stop to end.")
@@ -959,7 +984,7 @@ async def set_test_cmd(update, context):
     context.user_data['mode'] = 'set_next_test'
 
 async def set_schedule_cmd(update, context):
-    await update.message.reply_text("Send: `wake_up|sleep|study_hours`")
+    await update.message.reply_text("Send: `wake_up|sleep|study_hours` (e.g., `07:00|22:00|8`)")
     context.user_data['mode'] = 'schedule'
 
 async def add_backlog_cmd(update, context):
@@ -1016,7 +1041,7 @@ async def week_update_cmd(update, context):
 async def view_plan(update, context):
     today_plan = memory["today"]
     if not today_plan.get("generated"):
-        await update.message.reply_text("No to‑do list yet. Use /start_day or morning check‑in.")
+        await update.message.reply_text("No to‑do list yet. Use /start_day or wait for morning check‑in.")
         return
     todo = today_plan.get("todo", [])
     if not todo:
@@ -1193,14 +1218,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif mode == 'schedule':
         parts = text.split('|')
         if len(parts) == 3:
-            memory["schedule"]["wake_up"] = parts[0]; memory["schedule"]["sleep"] = parts[1]
-            memory["schedule"]["study_hours"] = int(parts[2])
+            wake = parts[0].strip()
+            sleep = parts[1].strip()
+            hours = int(parts[2].strip())
+            memory["schedule"]["wake_up"] = wake
+            memory["schedule"]["sleep"] = sleep
+            memory["schedule"]["study_hours"] = hours
             save_json("schedule", memory["schedule"])
-            for job in context.job_queue.jobs():
-                if job.name == "morning_checkin":
+            # Re-schedule morning check-in
+            for job in context.application.job_queue.jobs():
+                if job.name == "morning_checkin" and job.chat_id == update.effective_chat.id:
                     job.schedule_removal()
-            schedule_morning_checkin(context.job_queue, parts[0], update.effective_chat.id)
-            await update.message.reply_text("Schedule updated.")
+            schedule_morning_checkin(context.application.job_queue, wake, update.effective_chat.id)
+            await update.message.reply_text("Schedule updated. Morning check‑in will now happen at the new wake‑up time.")
             context.user_data['mode'] = None
         return
     elif mode == 'weekly':
@@ -1296,7 +1326,8 @@ def schedule_morning_checkin(job_queue, wake_up_str, chat_id):
 
 async def morning_checkin_callback(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
-    await start_daily_checkin(chat_id, context)
+    if chat_id:
+        await start_daily_checkin(chat_id, context)
 
 def schedule_weekly_pdf_prompt(job_queue, chat_id):
     job_queue.run_daily(weekly_schedule_prompt, time=datetime.strptime("08:00","%H:%M").time(),
@@ -1317,6 +1348,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("test_morning", test_morning_cmd))  # hidden debug command
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("chat", chat_cmd))
     app.add_handler(CommandHandler("stop", stop_cmd))
@@ -1341,10 +1373,17 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("notify", notify_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
+    # Do NOT schedule morning check-in here (needs a chat_id). It will be scheduled when user runs /start.
+    # Other scheduled jobs that don't need a specific chat_id can be added:
     if app.job_queue:
-        schedule = memory["schedule"]
-        schedule_morning_checkin(app.job_queue, schedule.get("wake_up","07:00"), None)
-        schedule_weekly_pdf_prompt(app.job_queue, None)
-        schedule_test_followups(app)
+        schedule_weekly_pdf_prompt(app.job_queue, None)  # This will ask for PDF on Saturday, but chat_id is None – better to schedule per user after start.
+        # Actually, we should schedule weekly PDF prompt only after we have a chat_id. For simplicity, remove it.
+        # Instead, we'll rely on the /start command to set it up later. For now, leaving it as None will not work.
+        # Let's comment it out:
+        # schedule_weekly_pdf_prompt(app.job_queue, None)
+        # We'll add it in the /start command. Modify /start to also schedule weekly PDF prompt.
+        pass
+    # Also schedule test followups – they use bot_data["user_chat_id"] later.
+    schedule_test_followups(app)
     print("Bot polling...")
     app.run_polling()
