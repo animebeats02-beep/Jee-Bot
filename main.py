@@ -43,20 +43,17 @@ def save_json(name, data):
 
 def init_syllabus():
     chapters = {
-        # Physics 12th
         "Physics_Simple_Harmonic_Motion": {"subject":"Physics","chapter":"Simple Harmonic Motion","class":12,"status":"not_started","sub_subject":"Physics"},
         "Physics_Geometrical_Optics": {"subject":"Physics","chapter":"Geometrical Optics","class":12,"status":"not_started","sub_subject":"Physics"},
         "Physics_Electrostatics": {"subject":"Physics","chapter":"Electrostatics","class":12,"status":"going_on","sub_subject":"Physics"},
         "Physics_Gravitation": {"subject":"Physics","chapter":"Gravitation","class":12,"status":"going_on","sub_subject":"Physics"},
         "Physics_Current_Electricity": {"subject":"Physics","chapter":"Current Electricity","class":12,"status":"revision_needed","sub_subject":"Physics"},
-        # Chemistry 12th
         "Chemistry_Solid_State": {"subject":"Chemistry","chapter":"Solid State","class":12,"status":"revision_needed","sub_subject":"Physical"},
         "Chemistry_Liquid_Solutions": {"subject":"Chemistry","chapter":"Liquid Solutions","class":12,"status":"going_on","sub_subject":"Physical"},
         "Chemistry_Chemical_Kinetics": {"subject":"Chemistry","chapter":"Chemical Kinetics","class":12,"status":"going_on","sub_subject":"Physical"},
         "Chemistry_Thermodynamics": {"subject":"Chemistry","chapter":"Thermodynamics","class":12,"status":"going_on","sub_subject":"Physical"},
         "Chemistry_Haloalkanes": {"subject":"Chemistry","chapter":"Haloalkanes","class":12,"status":"going_on","sub_subject":"Organic"},
         "Chemistry_Coordination_Compounds": {"subject":"Chemistry","chapter":"Coordination Compounds","class":12,"status":"going_on","sub_subject":"Inorganic"},
-        # Maths 12th
         "Maths_Functions_Relations": {"subject":"Maths","chapter":"Functions & Relations","class":12,"status":"completed","sub_subject":"Maths"},
         "Maths_ITF": {"subject":"Maths","chapter":"ITF","class":12,"status":"completed","sub_subject":"Maths"},
         "Maths_Limits": {"subject":"Maths","chapter":"Limits","class":12,"status":"going_on","sub_subject":"Maths"},
@@ -67,7 +64,7 @@ def init_syllabus():
         "Maths_Monotonicity": {"subject":"Maths","chapter":"Monotonicity Max/Min","class":12,"status":"weak","sub_subject":"Maths"},
         "Maths_Integral_Calculus": {"subject":"Maths","chapter":"Integral Calculus","class":12,"status":"going_on","sub_subject":"Maths"},
     }
-    # 11th defaults for test references
+    # 11th defaults
     orig_physics = ["Units & Measurements","Motion in Straight Line","Motion in Plane","Laws of Motion","Work Energy Power","Rotational Motion","Gravitation","Mechanical Properties Solids","Mechanical Properties Fluids","Thermal Properties","Thermodynamics","Kinetic Theory","Oscillations","Waves"]
     orig_chem = ["Some Basic Concepts","Structure Atom","States Matter","Thermodynamics","Equilibrium","Redox Reactions","Electrochemistry","Chemical Kinetics","Surface Chemistry","Classification Periodicity","Hydrogen","s-Block","p-Block 11","Environmental","Metallurgy","p-Block 12","d & f Block","Chemical Bonding","Organic Basic Principles","Hydrocarbons","Haloalkanes","Alcohols Phenols Ethers","Aldehydes Ketones","Amines","Biomolecules","Polymers","Chemistry Everyday"]
     orig_maths = ["Sets","Relations Functions","Trigonometric Functions","Mathematical Induction","Complex Numbers","Linear Inequalities","Permutations Combinations","Binomial Theorem","Sequences Series","Straight Lines","Conic Sections","3D Geometry","Limits Derivatives","Mathematical Reasoning","Statistics","Probability 11"]
@@ -213,7 +210,7 @@ def generate_revision_tasks_for_11th():
                 "id": f"rev11_{ch_key}_{datetime.now().strftime('%Y%m%d')}",
                 "subject": chap["subject"],
                 "chapter": chap["chapter"],
-                "type": "Revision (11th)",
+                "type": "11th Revision",
                 "estimated_time": 30,
                 "source": "test",
                 "status": "pending",
@@ -223,11 +220,8 @@ def generate_revision_tasks_for_11th():
     return tasks
 
 def generate_smart_revision_tasks(remaining_minutes):
-    """Generate high‑priority revision tasks to fill remaining time."""
-    if remaining_minutes <= 0:
-        return []
+    if remaining_minutes <= 0: return []
     tasks = []
-    # 1. Weak chapters first (most urgent)
     weak = get_weak_chapters()
     for ch_key in weak:
         if remaining_minutes <= 0: break
@@ -245,7 +239,6 @@ def generate_smart_revision_tasks(remaining_minutes):
                 "priority_score": 90
             })
             remaining_minutes -= 30
-    # 2. Ongoing chapters (most recent)
     ongoing = get_ongoing_chapters()
     for ch_key in ongoing:
         if remaining_minutes <= 0: break
@@ -263,102 +256,40 @@ def generate_smart_revision_tasks(remaining_minutes):
                 "priority_score": 70
             })
             remaining_minutes -= 30
-    # 3. Test 11th chapters (already covered by generate_revision_tasks_for_11th, so skip duplicate)
-    # Already included separately
     return tasks
 
-def generate_plan(study_hours_override=None, skip_keywords=None,
-                  test_chapters=None, ongoing_chapters=None):
-    schedule = memory["schedule"]
-    wake = schedule["wake_up"]
-    study_mins = (study_hours_override if study_hours_override else schedule["study_hours"]) * 60
+def generate_todo_list(study_hours_override=None, skip_keywords=None,
+                       test_chapters=None, ongoing_chapters=None):
+    study_mins = (study_hours_override if study_hours_override else memory["schedule"]["study_hours"]) * 60
     hw = memory["homework"]["tasks"] if memory["homework"]["date"] == datetime.now().strftime("%Y-%m-%d") else []
     backlog = [t for t in memory["backlog"]["tasks"] if t["status"]!="done"]
     if skip_keywords:
         backlog = [t for t in backlog if not should_skip_task(t, skip_keywords)]
-    if test_chapters is None:
-        test_chapters = []
-    if ongoing_chapters is None:
-        ongoing_chapters = get_ongoing_chapters()
-    # 11th test revision tasks
+    if test_chapters is None: test_chapters = []
+    if ongoing_chapters is None: ongoing_chapters = get_ongoing_chapters()
+
     revision_11th = generate_revision_tasks_for_11th()
-    # Combine all mandatory tasks first
     all_mandatory = revision_11th + hw + backlog
     for t in all_mandatory:
         t["priority_score"] = compute_priority(t, test_chapters, ongoing_chapters)
     all_mandatory.sort(key=lambda x: x["priority_score"], reverse=True)
-    # allocate mandatory tasks
-    wake_time = datetime.strptime(wake, "%H:%M")
-    current = wake_time
-    plan = []
-    remaining = study_mins
-    task_count = 0
-    for task in all_mandatory:
-        if remaining <= 0: break
-        effort = task.get("estimated_time",45)
-        block = min(effort, remaining)
-        end = current + timedelta(minutes=block)
-        plan.append({
-            "task_id": task.get("id",""),
-            "description": f"{task.get('subject','')} - {task.get('chapter','')} ({task.get('type','')})",
-            "start": current.strftime("%H:%M"),
-            "end": end.strftime("%H:%M"),
-            "subject": task.get("subject"),
-            "type": task.get("type"),
-            "status": "pending"
-        })
-        current = end
-        remaining -= block
-        task_count += 1
-        if task_count % 3 == 0 and remaining > 0:
-            break_end = current + timedelta(minutes=15)
-            plan.append({
-                "task_id": "break",
-                "description": "Break ☕",
-                "start": current.strftime("%H:%M"),
-                "end": break_end.strftime("%H:%M"),
-                "subject": "Break",
-                "type": "break",
-                "status": "pending"
-            })
-            current = break_end
-            remaining -= 15
-    # Fill remaining time with smart revision if homework was light
-    if remaining > 30:  # at least one revision block
-        smart_revisions = generate_smart_revision_tasks(remaining)
-        for task in smart_revisions:
-            if remaining <= 0: break
-            effort = task.get("estimated_time",30)
-            block = min(effort, remaining)
-            end = current + timedelta(minutes=block)
-            plan.append({
-                "task_id": task.get("id",""),
-                "description": f"{task.get('subject','')} - {task.get('chapter','')} ({task.get('type','')})",
-                "start": current.strftime("%H:%M"),
-                "end": end.strftime("%H:%M"),
-                "subject": task.get("subject"),
-                "type": task.get("type"),
-                "status": "pending"
-            })
-            current = end
-            remaining -= block
-            task_count += 1
-            if task_count % 3 == 0 and remaining > 0:
-                break_end = current + timedelta(minutes=15)
-                plan.append({
-                    "task_id": "break",
-                    "description": "Break ☕",
-                    "start": current.strftime("%H:%M"),
-                    "end": break_end.strftime("%H:%M"),
-                    "subject": "Break",
-                    "type": "break",
-                    "status": "pending"
-                })
-                current = break_end
-                remaining -= 15
-    memory["today"] = {"date": datetime.now().strftime("%Y-%m-%d"), "plan": plan, "generated": True}
+
+    total_mandatory_min = sum(t["estimated_time"] for t in all_mandatory)
+    remaining = study_mins - total_mandatory_min
+    smart_rev = []
+    if remaining > 30:
+        smart_rev = generate_smart_revision_tasks(remaining)
+
+    full_list = all_mandatory + smart_rev
+    total_min = sum(t["estimated_time"] for t in full_list)
+
+    memory["today"] = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "todo": full_list,
+        "generated": True
+    }
     save_json("today", memory["today"])
-    return plan
+    return full_list, total_min, study_mins
 
 # ---------- AI ----------
 def ask_ai(prompt, chat_history=None):
@@ -402,6 +333,220 @@ MOTIVATIONAL_QUOTES = [
     "“You don't have to be great to start, but you have to start to be great.” – Zig Ziglar",
 ]
 
+# ---------- shared homework entry state (used by both check‑in and /start_day) ----------
+homework_states: Dict[int, Dict[str, Any]] = {}
+
+def start_homework_entry(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    homework_states[chat_id] = {
+        "homework": [],
+        "skip_keywords": [],
+        "current_chapter": None,
+        "pending_exercise_types": [],
+        "current_exercise_counts": {},
+        "waiting_for_skip": False,
+        "final_callback": None,  # will be called when done
+    }
+
+async def handle_homework_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id not in homework_states:
+        return False
+    state = homework_states[chat_id]
+    text = update.message.text.strip()
+
+    if state.get("waiting_for_skip"):
+        # We are in the skip prompt
+        if text.lower() == "none":
+            state["skip_keywords"] = []
+        else:
+            state["skip_keywords"] = [kw.strip() for kw in text.split(",") if kw.strip()]
+        # finalize
+        await finalize_homework_and_generate(update, context)
+        return True
+
+    # homework chapter entry
+    if text.lower() == "done":
+        state["waiting_for_skip"] = True
+        if state["homework"]:
+            task_list = "\n".join(f"{t['subject']} - {t['chapter']} ({t['type']})" for t in state["homework"])
+            await update.message.reply_text(f"Your homework:\n{task_list}")
+        else:
+            await update.message.reply_text("No homework recorded.")
+        await update.message.reply_text("🙅 Any homework tasks to skip? Send keywords/comma‑separated or type `none`.")
+        return True
+
+    # chapter key entry
+    chapter_key = text.strip()
+    if chapter_key not in memory["syllabus"]["chapters"]:
+        # auto-create new chapter
+        parts = chapter_key.split('_', 1)
+        if len(parts) == 2 and parts[0] in ("Physics","Chemistry","Maths"):
+            subject = parts[0]
+            chapter = parts[1].replace('_',' ')
+            sub = subject
+            if subject == "Chemistry":
+                if any(w in chapter for w in ["Haloalkane","Alcohol","Aldehyde","Ketone","Amine","Polymer","Biomolecule","Ether","Organic","Hydrocarbon"]):
+                    sub = "Organic"
+                elif any(w in chapter for w in ["Coordination","d & f","p-Block","s-Block","Metallurgy","Hydrogen"]):
+                    sub = "Inorganic"
+                else:
+                    sub = "Physical"
+            memory["syllabus"]["chapters"][chapter_key] = {
+                "subject": subject, "chapter": chapter,
+                "class": 12, "status": "not_started", "sub_subject": sub
+            }
+            save_json("syllabus", memory["syllabus"])
+            await update.message.reply_text(f"📌 New chapter added: {subject} - {chapter}")
+        else:
+            await update.message.reply_text("❌ Invalid chapter key. Format `Subject_Chapter`.")
+            return True
+
+    chapter_info = memory["syllabus"]["chapters"][chapter_key]
+    subject = chapter_info["subject"]
+    state["current_chapter"] = chapter_key
+    state["state"] = "waiting_exercise_types"
+    await update.message.reply_text(
+        f"📋 {subject} - {chapter_info['chapter']}: exercise types? (O1,O2,O3,O4,JM,JA,Gyanoday)"
+    )
+    return True
+
+async def handle_exercise_types(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    state = homework_states.get(chat_id)
+    if not state or state.get("waiting_for_skip"):
+        return False
+    text = update.message.text.strip()
+    if text.lower() == "done":
+        # skip this chapter
+        state["state"] = None
+        await update.message.reply_text("Chapter skipped. Next chapter key or `done`.")
+        return True
+    types = [t.strip() for t in text.split(",") if t.strip()]
+    valid_types = [t for t in types if t in EXERCISE_TIMES]
+    if not valid_types:
+        await update.message.reply_text("No valid types. Use O1,O2,O3,O4,JM,JA,Gyanoday.")
+        return True
+    state["pending_exercise_types"] = valid_types
+    state["current_exercise_counts"] = {}
+    chapter_key = state["current_chapter"]
+    subject = memory["syllabus"]["chapters"][chapter_key]["subject"]
+    if subject == "Maths":
+        for ex in valid_types:
+            state["current_exercise_counts"][ex] = MATHS_DEFAULTS.get(ex,0)
+        msg = "🔢 Default Maths counts:\n" + "\n".join(f"{k}: {v}" for k,v in state["current_exercise_counts"].items())
+        msg += "\nReply `ok` if correct, or send `O2=25`."
+        await update.message.reply_text(msg)
+        state["state"] = "waiting_exercise_counts"
+    else:
+        await update.message.reply_text(f"How many questions in **{valid_types[0]}**? (send a number)")
+        state["state"] = "waiting_exercise_counts"
+    return True
+
+async def handle_exercise_counts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    state = homework_states.get(chat_id)
+    if not state or state.get("waiting_for_skip"):
+        return False
+    text = update.message.text.strip()
+    if text.lower() == "ok":
+        chapter_key = state["current_chapter"]
+        save_chapter_exercise_counts(chapter_key, state["current_exercise_counts"])
+        total_time = estimate_homework_time(state["current_exercise_counts"])
+        task = {
+            "id": str(int(datetime.timestamp(datetime.now()))),
+            "subject": memory["syllabus"]["chapters"][chapter_key]["subject"],
+            "chapter": memory["syllabus"]["chapters"][chapter_key]["chapter"],
+            "type": "mixed",
+            "estimated_time": total_time,
+            "source": "coaching",
+            "status": "pending",
+            "chapter_key": chapter_key,
+            "exercise_counts": state["current_exercise_counts"]
+        }
+        state["homework"].append(task)
+        state["state"] = None
+        await update.message.reply_text(f"✅ Added homework for {task['subject']} - {task['chapter']} (est. {total_time} min). Next chapter key or `done`.")
+        return True
+
+    if "=" in text:
+        parts = text.split("=")
+        ex = parts[0].strip()
+        try:
+            count = int(parts[1])
+            if ex in state["current_exercise_counts"]:
+                state["current_exercise_counts"][ex] = count
+                await update.message.reply_text(f"Updated {ex} to {count}. Send another or `ok`.")
+            else:
+                await update.message.reply_text("Type not in list. Send `ok` to finish.")
+        except ValueError:
+            await update.message.reply_text("Invalid number. Use `O2=25`.")
+        return True
+
+    try:
+        count = int(text)
+        remaining_types = [t for t in state["pending_exercise_types"] if t not in state["current_exercise_counts"]]
+        if not remaining_types:
+            await update.message.reply_text("All types have counts. Reply `ok` to finalize.")
+            return True
+        current_type = remaining_types[0]
+        state["current_exercise_counts"][current_type] = count
+        next_types = [t for t in state["pending_exercise_types"] if t not in state["current_exercise_counts"]]
+        if next_types:
+            await update.message.reply_text(f"How many questions in **{next_types[0]}**? (send a number)")
+        else:
+            await update.message.reply_text("All types entered. Reply `ok` to finalize this chapter.")
+        return True
+    except ValueError:
+        await update.message.reply_text("Please enter a number, or `ok` to finish.")
+        return True
+
+async def finalize_homework_and_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    state = homework_states.pop(chat_id, None)
+    if not state:
+        return
+    # save homework
+    memory["homework"] = {"date": datetime.now().strftime("%Y-%m-%d"), "tasks": state["homework"]}
+    save_json("homework", memory["homework"])
+    # generate to-do
+    todo, total_est, avail_mins = generate_todo_list(skip_keywords=state["skip_keywords"])
+    daily_hrs = memory["schedule"]["study_hours"]
+    days = estimate_backlog_days(daily_hrs)
+    update_streak_and_hours(daily_hrs)
+    # time windows
+    wake = memory["schedule"]["wake_up"]
+    try:
+        wake_dt = datetime.strptime(wake, "%H:%M")
+        wake_hours = wake_dt.hour + wake_dt.minute/60
+    except:
+        wake_hours = 7.0
+    sleep_time = memory["schedule"]["sleep"]
+    try:
+        sleep_dt = datetime.strptime(sleep_time, "%H:%M")
+        sleep_hours = sleep_dt.hour + sleep_dt.minute/60
+    except:
+        sleep_hours = 22.0
+    morning_hours = max(0, 12 - wake_hours)
+    evening_hours = max(0, sleep_hours - 20)
+    total_free = round(morning_hours + evening_hours, 1)
+
+    def emoji(score):
+        if score>=80: return "🔴"
+        if score>=60: return "🟠"
+        if score>=40: return "🟡"
+        return "🟢"
+
+    msg = "📅 *Today's To‑Do List* (Classes: 12 PM – 8 PM)\n"
+    msg += f"🕒 Free hours: ~{total_free}h (morning {morning_hours}h + evening {evening_hours}h)\n"
+    msg += f"⏱️ Total task time: {total_est} min ({total_est/60:.1f}h)\n"
+    if total_est > avail_mins:
+        msg += "⚠️ Task time exceeds available study time.\n"
+    msg += "\n"
+    for task in todo:
+        msg += f"{emoji(task.get('priority_score',50))} {task['subject']} - {task['chapter']} ({task['type']}) – {task['estimated_time']} min\n"
+    msg += f"\n⏳ *Backlog estimate:* ~{days} day(s) at {daily_hrs}h/day."
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
 # ---------- morning check‑in ----------
 checkin_states: Dict[int, Dict[str, Any]] = {}
 
@@ -413,8 +558,6 @@ async def start_morning_checkin(context: ContextTypes.DEFAULT_TYPE):
         "wake_time": None,
         "mood": None,
         "study_hours": None,
-        "homework": [],
-        "skip_keywords": []
     }
     await context.bot.send_message(chat_id, "🌅 Good morning! How many hours did you sleep last night? (e.g., 6.5)")
 
@@ -459,242 +602,16 @@ async def handle_checkin_message(update: Update, context: ContextTypes.DEFAULT_T
         try:
             hours = float(text)
             state["study_hours"] = hours
-            state["state"] = "waiting_homework_start"
+            # Transition to homework entry
+            del checkin_states[chat_id]  # clear check-in state
+            start_homework_entry(chat_id, context)
             await update.message.reply_text("📝 Enter today's homework chapter keys (e.g., `Physics_Electrostatics`) or type `done`.\nIf it's a new chapter, I'll add it automatically.")
         except ValueError:
             await update.message.reply_text("Number (e.g., 8).")
         return True
-    elif state["state"] == "waiting_homework_start":
-        if text.lower() == "done":
-            state["state"] = "waiting_skip_homework"
-            if state["homework"]:
-                task_list = "\n".join(f"{t['subject']} - {t['chapter']} ({t['type']})" for t in state["homework"])
-                await update.message.reply_text(f"Your homework:\n{task_list}")
-            else:
-                await update.message.reply_text("No homework recorded.")
-            await update.message.reply_text("🙅 Any homework tasks to skip? Send keywords/comma‑separated or type `none`.")
-        else:
-            chapter_key = text.strip()
-            # auto-create new chapter
-            if chapter_key not in memory["syllabus"]["chapters"]:
-                parts = chapter_key.split('_', 1)
-                if len(parts) == 2 and parts[0] in ("Physics","Chemistry","Maths"):
-                    subject = parts[0]
-                    chapter = parts[1].replace('_',' ')
-                    sub = subject
-                    if subject == "Chemistry":
-                        if any(w in chapter for w in ["Haloalkane","Alcohol","Aldehyde","Ketone","Amine","Polymer","Biomolecule","Ether","Organic","Hydrocarbon"]):
-                            sub = "Organic"
-                        elif any(w in chapter for w in ["Coordination","d & f","p-Block","s-Block","Metallurgy","Hydrogen"]):
-                            sub = "Inorganic"
-                        else:
-                            sub = "Physical"
-                    memory["syllabus"]["chapters"][chapter_key] = {
-                        "subject": subject,
-                        "chapter": chapter,
-                        "class": 12,
-                        "status": "not_started",
-                        "sub_subject": sub
-                    }
-                    save_json("syllabus", memory["syllabus"])
-                    await update.message.reply_text(f"📌 New chapter added: {subject} - {chapter}")
-                else:
-                    await update.message.reply_text("❌ Invalid chapter key. Format `Subject_Chapter` (e.g., Physics_Electrostatics).")
-                    return True
-            chapter_info = memory["syllabus"]["chapters"][chapter_key]
-            subject = chapter_info["subject"]
-            state["current_hw_chapter"] = chapter_key
-            state["state"] = "waiting_exercise_types"
-            await update.message.reply_text(
-                f"📋 {subject} - {chapter_info['chapter']}: exercise types? (O1,O2,O3,O4,JM,JA,Gyanoday)"
-            )
-        return True
-    elif state["state"] == "waiting_exercise_types":
-        if text.lower() == "done":
-            state["state"] = "waiting_homework_start"
-            await update.message.reply_text("Chapter skipped. Next key or `done`.")
-            return True
-        types = [t.strip() for t in text.split(",") if t.strip()]
-        valid_types = [t for t in types if t in EXERCISE_TIMES]
-        if not valid_types:
-            await update.message.reply_text("No valid types. Use O1,O2,O3,O4,JM,JA,Gyanoday.")
-            return True
-        state["pending_exercise_types"] = valid_types
-        state["current_exercise_counts"] = {}
-        chapter_key = state["current_hw_chapter"]
-        subject = memory["syllabus"]["chapters"][chapter_key]["subject"]
-        if subject == "Maths":
-            for ex in valid_types:
-                state["current_exercise_counts"][ex] = MATHS_DEFAULTS.get(ex,0)
-            msg = "🔢 Default Maths counts:\n" + "\n".join(f"{k}: {v}" for k,v in state["current_exercise_counts"].items())
-            msg += "\nReply `ok` if correct, or send `O2=25`."
-            await update.message.reply_text(msg)
-            state["state"] = "waiting_exercise_counts"
-        else:
-            await update.message.reply_text(f"How many questions in **{valid_types[0]}**? (send a number)")
-            state["state"] = "waiting_exercise_counts"
-        return True
-    elif state["state"] == "waiting_exercise_counts":
-        if text.lower() == "ok":
-            chapter_key = state["current_hw_chapter"]
-            save_chapter_exercise_counts(chapter_key, state["current_exercise_counts"])
-            total_time = estimate_homework_time(state["current_exercise_counts"])
-            task = {
-                "id": str(int(datetime.timestamp(datetime.now()))),
-                "subject": memory["syllabus"]["chapters"][chapter_key]["subject"],
-                "chapter": memory["syllabus"]["chapters"][chapter_key]["chapter"],
-                "type": "mixed",
-                "estimated_time": total_time,
-                "source": "coaching",
-                "status": "pending",
-                "chapter_key": chapter_key,
-                "exercise_counts": state["current_exercise_counts"]
-            }
-            state["homework"].append(task)
-            state["state"] = "waiting_homework_start"
-            await update.message.reply_text(f"✅ Added homework for {task['subject']} - {task['chapter']} (est. {total_time} min). Next chapter or `done`.")
-            return True
-        if "=" in text:
-            parts = text.split("=")
-            ex = parts[0].strip()
-            try:
-                count = int(parts[1])
-                if ex in state["current_exercise_counts"]:
-                    state["current_exercise_counts"][ex] = count
-                    await update.message.reply_text(f"Updated {ex} to {count}. Send another or `ok`.")
-                else:
-                    await update.message.reply_text("Type not in list. Send `ok` to finish.")
-            except ValueError:
-                await update.message.reply_text("Invalid number. Use `O2=25`.")
-            return True
-        try:
-            count = int(text)
-            remaining_types = [t for t in state["pending_exercise_types"] if t not in state["current_exercise_counts"]]
-            if not remaining_types:
-                await update.message.reply_text("All types have counts. Reply `ok` to finalize.")
-                return True
-            current_type = remaining_types[0]
-            state["current_exercise_counts"][current_type] = count
-            next_types = [t for t in state["pending_exercise_types"] if t not in state["current_exercise_counts"]]
-            if next_types:
-                await update.message.reply_text(f"How many questions in **{next_types[0]}**? (send a number)")
-            else:
-                await update.message.reply_text("All types entered. Reply `ok` to finalize this chapter.")
-            return True
-        except ValueError:
-            await update.message.reply_text("Please enter a number, or `ok` to finish.")
-            return True
-    elif state["state"] == "waiting_skip_homework":
-        if text.lower() == "none":
-            state["skip_keywords"] = []
-        else:
-            state["skip_keywords"] = [kw.strip() for kw in text.split(",") if kw.strip()]
-        state["state"] = "finalize"
-        return await handle_checkin_message(update, context)
-
-    if state["state"] == "finalize":
-        sleep_msg = ""
-        if state["sleep"] is not None:
-            diff = state["sleep"] - RECOMMENDED_SLEEP
-            if diff >= 1:
-                sleep_msg = f"You slept {state['sleep']}h — well rested! (+{diff:.1f}h vs recommended)."
-            elif diff <= -1:
-                sleep_msg = f"You slept {state['sleep']}h — that's less than the recommended {RECOMMENDED_SLEEP}h. Try to rest more."
-            else:
-                sleep_msg = f"You slept {state['sleep']}h — adequate."
-
-        memory["homework"] = {"date": datetime.now().strftime("%Y-%m-%d"), "tasks": state["homework"]}
-        save_json("homework", memory["homework"])
-
-        plan = generate_plan(study_hours_override=state["study_hours"], skip_keywords=state["skip_keywords"])
-        daily_hrs = state["study_hours"] if state["study_hours"] else memory["schedule"]["study_hours"]
-        days = estimate_backlog_days(daily_hrs)
-
-        update_streak_and_hours(daily_hrs, mood=state["mood"], sleep_hours=state["sleep"])
-
-        plan_msg = "📅 *Your Daily Plan*\n" + "\n".join(
-            f"`{b['start']}-{b['end']}` {b['description']} ({b['status']})" for b in plan
-        )
-        plan_msg += f"\n\n⏳ *Backlog estimate:* At {daily_hrs}h/day, you'll clear all pending backlog in ~{days} day(s)."
-        if sleep_msg:
-            plan_msg = sleep_msg + "\n\n" + plan_msg
-        await update.message.reply_text(plan_msg, parse_mode='Markdown')
-
-        for b in plan:
-            if b["type"] != "break":
-                try:
-                    start_time = datetime.strptime(b["start"], "%H:%M").time()
-                    context.job_queue.run_daily(
-                        lambda ctx, txt=f"⏰ Start: {b['description']} now!": ctx.bot.send_message(ctx.job.chat_id, text=txt),
-                        time=start_time,
-                        chat_id=chat_id,
-                        name=b["task_id"]
-                    )
-                except: pass
-
-        del checkin_states[chat_id]
-        return True
     return False
 
-# ---------- test management ----------
-def schedule_test_followups(app):
-    if not app.job_queue: return
-    next_date_str = memory["tests"].get("next_test_date")
-    if not next_date_str: return
-    try:
-        test_date = date.fromisoformat(next_date_str)
-    except: return
-    if test_date < date.today(): return
-    for job in app.job_queue.jobs():
-        if job.name in ("test_day_prompt", "post_test_prompt"):
-            job.schedule_removal()
-    test_day_dt = datetime.combine(test_date, datetime.strptime("18:00", "%H:%M").time())
-    app.job_queue.run_once(post_test_prompt, when=test_day_dt, chat_id=None, name="test_day_prompt")
-    next_prompt_date = test_date + timedelta(days=2)
-    next_prompt_dt = datetime.combine(next_prompt_date, datetime.strptime("12:00", "%H:%M").time())
-    app.job_queue.run_once(ask_next_test_info, when=next_prompt_dt, chat_id=None, name="post_test_prompt")
-
-async def post_test_prompt(context):
-    chat_id = context.job.chat_id or context.bot_data.get("user_chat_id")
-    if chat_id:
-        await context.bot.send_message(chat_id, "📝 How did your monthly test go? Any feedback?")
-        memory["tests"]["test_asked_today"] = True
-        save_json("tests", memory["tests"])
-
-async def ask_next_test_info(context):
-    chat_id = context.job.chat_id or context.bot_data.get("user_chat_id")
-    if chat_id:
-        await context.bot.send_message(chat_id,
-            "📅 Please set your next monthly test.\nSend: `Test Date (YYYY-MM-DD) | 11th Chapter Keys (comma separated)`\nExample: `2026-07-28|Physics_Kinematics,Chemistry_Some_Basic_Concepts`")
-
-async def set_test_cmd(update, context):
-    await update.message.reply_text("Send: `Test Date (YYYY-MM-DD) | 11th Chapter Keys (comma separated)`")
-    context.user_data['mode'] = 'set_next_test'
-
-async def handle_set_test(update, context):
-    text = update.message.text
-    parts = text.split('|')
-    if len(parts) >= 1:
-        date_str = parts[0].strip()
-        chaps_11th = []
-        if len(parts) > 1:
-            chaps_11th = [c.strip() for c in parts[1].split(',') if c.strip()]
-        try:
-            date.fromisoformat(date_str)
-        except:
-            await update.message.reply_text("Invalid date format. Use YYYY-MM-DD.")
-            return
-        memory["tests"]["next_test_date"] = date_str
-        memory["tests"]["next_test_11th_syllabus"] = chaps_11th
-        memory["tests"]["test_asked_today"] = False
-        save_json("tests", memory["tests"])
-        schedule_test_followups(context.application)
-        await update.message.reply_text("✅ Test set. Daily 11th revision tasks will now appear.")
-        context.user_data['mode'] = None
-    else:
-        await update.message.reply_text("Invalid format. Use `Date|Chapter,Chapter`")
-
-# ---------- other commands (unchanged) ----------
+# ---------- other commands ----------
 async def start(update, context):
     await update.message.reply_text("🚀 JEE Study OS ready! /help for commands.")
     context.bot_data["user_chat_id"] = update.effective_chat.id
@@ -704,28 +621,24 @@ async def help_cmd(update, context):
 📚 JEE Study OS Commands
 
 🌅 Morning Check‑in: automatic at wake‑up time.
+/start_day – Manually enter today's homework and get your to‑do list.
 
-💬 /chat – Start AI chat (/stop to end)
-/ask <q> – One‑shot AI question
-/motivate – Random JEE quote
-/stats – Study stats & streak
-/week_report – 7‑day summary
-/set_test – Set monthly test date & 11th syllabus
-/view_tests – Show upcoming tests
+💬 /chat – AI chat (/stop to end)
+/ask <q> – One‑shot AI
+/motivate – Random quote
+/stats – Streak & hours
+/week_report – This week's summary
+/set_test – Monthly test date & 11th syllabus
+/view_tests – Show upcoming test
 
 📌 Manual:
 /set_schedule – wake|sleep|study_hours
 /add_backlog – Add backlog
 /view_backlog – Show backlog
-/update_syllabus – Update chapter status
-/view_syllabus – See syllabus progress
-/add_test – Add manual test
-/start_day – Generate plan manually
-/view_plan – Show today's plan
-/complete_task – Mark task done
-/week_update – Enter weekly timetable
-
-💡 New chapters auto‑added during homework. Light homework days get smart revision suggestions.
+/update_syllabus – Change chapter status
+/view_syllabus – Full progress
+/complete_task – Mark done
+/week_update – Timetable entry
 """
     await update.message.reply_text(text)
 
@@ -787,7 +700,7 @@ async def set_schedule_cmd(update, context):
     context.user_data['mode'] = 'schedule'
 
 async def add_backlog_cmd(update, context):
-    await update.message.reply_text("Send backlog tasks like `Physics|Gravitation|Theory|90` – type `done` when finished.")
+    await update.message.reply_text("Send backlog tasks like `Physics|Gravitation|Theory|90` – type `done`.")
     context.user_data['mode'] = 'backlog'
     context.user_data['temp'] = []
 
@@ -837,42 +750,28 @@ async def week_update_cmd(update, context):
     context.user_data['mode'] = 'weekly'
 
 async def start_day(update, context):
-    plan = generate_plan()
-    if not plan:
-        await update.message.reply_text("No tasks to plan.")
-        return
-    daily_hrs = memory["schedule"]["study_hours"]
-    days = estimate_backlog_days(daily_hrs)
-    update_streak_and_hours(daily_hrs)
-    msg = "✅ Today's plan:\n" + "\n".join(
-        f"`{b['start']}-{b['end']}` {b['description']} ({b['status']})" for b in plan)
-    msg += f"\n\n⏳ Backlog: ~{days} day(s)."
-    await update.message.reply_text(msg, parse_mode='Markdown')
-    for b in plan:
-        if b["type"] != "break":
-            try:
-                start_time = datetime.strptime(b["start"], "%H:%M").time()
-                context.job_queue.run_daily(
-                    lambda ctx, txt=f"⏰ Start: {b['description']} now!": ctx.bot.send_message(ctx.job.chat_id, text=txt),
-                    time=start_time, chat_id=update.effective_chat.id, name=b["task_id"])
-            except: pass
+    chat_id = update.effective_chat.id
+    # Start homework entry flow
+    start_homework_entry(chat_id, context)
+    await update.message.reply_text("📝 Enter today's homework chapter keys (e.g., `Physics_Electrostatics`) or type `done`.\nIf it's a new chapter, I'll add it automatically.")
 
 async def view_plan(update, context):
     today = memory["today"]
     if not today.get("generated"):
-        await update.message.reply_text("No plan yet.")
+        await update.message.reply_text("No to‑do list yet. Use /start_day or morning check‑in.")
         return
-    msg = "📅 *Today's Plan*\n" + "\n".join(
-        f"`{b['start']}-{b['end']}` {b['description']} [{b['status']}]" for b in today["plan"])
+    todo = today.get("todo", [])
+    msg = "📅 *Today's To‑Do*\n" + "\n".join(
+        f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in todo
+    )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 # ---------- message router ----------
 async def handle_message(update, context):
+    chat_id = update.effective_chat.id
     if update.message.text.startswith('/'):
         return
-    if context.user_data.get('mode') == 'set_next_test':
-        await handle_set_test(update, context)
-        return
+    # 1. check if in chat mode
     if context.user_data.get('mode') == 'chat':
         history = context.user_data.get('chat_history', [])
         user_msg = update.message.text
@@ -882,11 +781,35 @@ async def handle_message(update, context):
         context.user_data['chat_history'] = history
         await update.message.reply_text(reply)
         return
-    if await handle_checkin_message(update, context):
+    # 2. check if in set_next_test mode
+    if context.user_data.get('mode') == 'set_next_test':
+        await handle_set_test(update, context)
         return
-    if context.bot_data.get("expecting_pdf",{}).get(update.effective_chat.id):
+    # 3. morning check‑in
+    if chat_id in checkin_states:
+        handled = await handle_checkin_message(update, context)
+        if handled:
+            return
+    # 4. homework entry (shared state)
+    if chat_id in homework_states:
+        state = homework_states[chat_id]
+        if state.get("waiting_for_skip"):
+            await handle_homework_entry(update, context)
+            return
+        if state.get("state") == "waiting_exercise_types":
+            await handle_exercise_types(update, context)
+            return
+        if state.get("state") == "waiting_exercise_counts":
+            await handle_exercise_counts(update, context)
+            return
+        # default: assume chapter entry
+        await handle_homework_entry(update, context)
+        return
+    # 5. PDF mode
+    if context.bot_data.get("expecting_pdf",{}).get(chat_id):
         await handle_document(update, context)
         return
+    # 6. other modes (backlog, test, etc.)
     mode = context.user_data.get('mode')
     text = update.message.text
     if mode == 'backlog':
@@ -961,12 +884,12 @@ async def handle_message(update, context):
     elif mode == 'complete':
         today = memory["today"]
         found = False
-        for block in today.get("plan",[]):
-            if text.lower() in block["task_id"].lower() or text.lower() in block["description"].lower():
-                block["status"] = "done"
+        for task in today.get("todo", []):
+            if text.lower() in task.get("id","").lower() or text.lower() in task.get("description","").lower():
+                task["status"] = "done"
                 found = True
                 memory["progress"]["logs"].append({
-                    "task_id": block["task_id"], "description": block["description"],
+                    "task_id": task["id"], "description": task.get("description",""),
                     "timestamp": datetime.now().isoformat()
                 })
                 save_json("progress", memory["progress"])
@@ -983,28 +906,9 @@ async def handle_message(update, context):
         context.user_data['mode'] = None
         return
     # default coach mode
-    await update.message.reply_text("I'm in coach mode. Use /help to see commands, or wait for your morning check‑in. If you need AI assistance, try /ask <question>.")
+    await update.message.reply_text("I'm in coach mode. Use /help to see commands, or wait for your morning check‑in.")
 
-# ---------- autonomous ----------
-async def autonomous_check(context):
-    today = memory["today"]
-    if not today.get("generated"): return
-    now = datetime.now().strftime("%H:%M")
-    plan = today["plan"]
-    updated = False
-    for block in plan:
-        if block["status"] == "pending" and now > block["end"]:
-            block["status"] = "missed"
-            updated = True
-            await context.bot.send_message(chat_id=context.job.chat_id, text=f"⚠️ Missed: {block['description']} ({block['start']}-{block['end']})")
-    if updated:
-        memory["today"] = today
-        save_json("today", memory["today"])
-
-def schedule_morning_checkin(job_queue, wake_up_str, chat_id):
-    wake_time = datetime.strptime(wake_up_str, "%H:%M").time()
-    job_queue.run_daily(start_morning_checkin, time=wake_time, chat_id=chat_id, name="morning_checkin")
-
+# ---------- PDF / schedule ----------
 async def weekly_schedule_prompt(context):
     chat_id = context.job.chat_id
     await context.bot.send_message(chat_id, "📅 It's Saturday! Please upload your class schedule PDF for batch CETQAS.")
@@ -1042,6 +946,10 @@ async def handle_document(update, context):
         else:
             await update.message.reply_text("Please send a PDF file.")
         context.bot_data["expecting_pdf"][chat_id] = False
+
+def schedule_morning_checkin(job_queue, wake_up_str, chat_id):
+    wake_time = datetime.strptime(wake_up_str, "%H:%M").time()
+    job_queue.run_daily(start_morning_checkin, time=wake_time, chat_id=chat_id, name="morning_checkin")
 
 def schedule_weekly_pdf_prompt(job_queue, chat_id):
     job_queue.run_daily(weekly_schedule_prompt, time=datetime.strptime("08:00","%H:%M").time(),
@@ -1082,10 +990,9 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     if app.job_queue:
-        app.job_queue.run_repeating(autonomous_check, interval=600, first=10)
         schedule = memory["schedule"]
         schedule_morning_checkin(app.job_queue, schedule["wake_up"], None)
         schedule_weekly_pdf_prompt(app.job_queue, None)
-        schedule_test_followups(app)
+        # test follow-ups still exist (unused here but kept)
     print("Bot polling...")
     app.run_polling()
