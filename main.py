@@ -3,6 +3,8 @@ import json
 import threading
 import time
 import random
+import asyncio
+import re
 from datetime import datetime, timedelta, date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, List
@@ -91,7 +93,8 @@ memory = {
     "backlog": load_json("backlog", {"tasks": []}),
     "today": load_json("today", {"date": "", "plan": [], "generated": False}),
     "schedule": load_json("schedule", {"wake_up": "07:00", "sleep": "22:00", "study_hours": 8,
-                                       "weekly_timetable": "", "last_updated": ""}),
+                                       "weekly_timetable": "", "last_updated": "",
+                                       "notifications": {"enabled": True, "interval_minutes": 120}}),
     "progress": load_json("progress", {"logs": []}),
     "stats": load_json("stats", {
         "productivity": [], "consistency": 0, "fatigue_flags": 0,
@@ -113,8 +116,18 @@ memory = {
 RECOMMENDED_SLEEP = 7.5
 EXERCISE_TIMES = {"O1":5,"O2":7,"O3":7,"O4":5,"JM":5,"JA":8,"Gyanoday":10}
 MATHS_DEFAULTS = {"O1":30,"O2":20,"O3":20,"O4":10,"JM":30,"JA":20}
+MOTIVATIONAL_QUOTES = [
+    "“Success is no accident. It is hard work, perseverance, learning, studying, sacrifice and most of all, love of what you are doing.” – Pelé",
+    "“Don't watch the clock; do what it does. Keep going.” – Sam Levenson",
+    "“The difference between ordinary and extraordinary is that little extra.” – Jimmy Johnson",
+    "“There is no substitute for hard work.” – Thomas Edison",
+    "“I find that the harder I work, the more luck I seem to have.” – Thomas Jefferson",
+    "“It's not about how bad you want it. It's about how hard you're willing to work for it.” – Unknown",
+    "“Success is the sum of small efforts, repeated day in and day out.” – Robert Collier",
+    "“You don't have to be great to start, but you have to start to be great.” – Zig Ziglar",
+]
 
-# ---------- helpers ----------
+# ---------- helpers (same as original, shortened for brevity) ----------
 def get_ongoing_chapters():
     return [k for k,v in memory["syllabus"]["chapters"].items() if v["status"] == "going_on"]
 
@@ -283,15 +296,12 @@ def generate_todo_list(study_hours_override=None, skip_keywords=None,
     full_list = all_mandatory + smart_rev
     total_min = sum(t["estimated_time"] for t in full_list)
 
-    # Overflow handling: if total_min > study_mins, move low-priority tasks to backlog
     overflow_tasks = []
     if total_min > study_mins:
-        # Sort ascending (lowest priority first)
         full_list.sort(key=lambda x: x["priority_score"])
         while full_list and sum(t["estimated_time"] for t in full_list) > study_mins:
             removed = full_list.pop(0)
             overflow_tasks.append(removed)
-        # Add overflow to backlog
         if overflow_tasks:
             for task in overflow_tasks:
                 task["status"] = "pending"
@@ -300,7 +310,6 @@ def generate_todo_list(study_hours_override=None, skip_keywords=None,
                 memory["backlog"]["tasks"].append(task)
             save_json("backlog", memory["backlog"])
         total_min = sum(t["estimated_time"] for t in full_list)
-        # Re-sort by priority descending for display
         full_list.sort(key=lambda x: x["priority_score"], reverse=True)
 
     memory["today"] = {"date": datetime.now().strftime("%Y-%m-%d"), "todo": full_list, "generated": True}
@@ -339,7 +348,6 @@ Today's plan: {'Generated' if memory['today']['generated'] else 'Not yet'}.
         return f"AI error: {str(e)}"
 
 def parse_homework_with_ai(text: str) -> Dict[str, Any] | None:
-    """Use Groq to extract structured homework data from free text."""
     prompt = (
         "Extract JEE homework details from the following user message. "
         "Return a valid JSON object with keys: subject (Physics/Chemistry/Maths), "
@@ -349,8 +357,6 @@ def parse_homework_with_ai(text: str) -> Dict[str, Any] | None:
     )
     try:
         response = ask_ai(prompt)
-        # Try to find JSON in response
-        import re
         match = re.search(r'\{.*\}', response, re.DOTALL)
         if match:
             return json.loads(match.group(0))
@@ -358,18 +364,7 @@ def parse_homework_with_ai(text: str) -> Dict[str, Any] | None:
         pass
     return None
 
-MOTIVATIONAL_QUOTES = [
-    "“Success is no accident. It is hard work, perseverance, learning, studying, sacrifice and most of all, love of what you are doing.” – Pelé",
-    "“Don't watch the clock; do what it does. Keep going.” – Sam Levenson",
-    "“The difference between ordinary and extraordinary is that little extra.” – Jimmy Johnson",
-    "“There is no substitute for hard work.” – Thomas Edison",
-    "“I find that the harder I work, the more luck I seem to have.” – Thomas Jefferson",
-    "“It's not about how bad you want it. It's about how hard you're willing to work for it.” – Unknown",
-    "“Success is the sum of small efforts, repeated day in and day out.” – Robert Collier",
-    "“You don't have to be great to start, but you have to start to be great.” – Zig Ziglar",
-]
-
-# ---------- Shared daily check-in state ----------
+# ---------- Daily check-in state ----------
 daily_states: Dict[int, Dict[str, Any]] = {}
 
 async def start_daily_checkin(chat_id, context):
@@ -403,7 +398,6 @@ async def handle_daily_checkin_message(update: Update, context: ContextTypes.DEF
         except ValueError:
             await update.message.reply_text("Please enter a number (e.g., 7).")
         return True
-
     elif state["state"] == "waiting_wake":
         try:
             datetime.strptime(text, "%H:%M")
@@ -413,7 +407,6 @@ async def handle_daily_checkin_message(update: Update, context: ContextTypes.DEF
         except ValueError:
             await update.message.reply_text("Please enter a valid time (HH:MM).")
         return True
-
     elif state["state"] == "waiting_mood":
         try:
             mood = int(text)
@@ -426,7 +419,6 @@ async def handle_daily_checkin_message(update: Update, context: ContextTypes.DEF
         except ValueError:
             await update.message.reply_text("Please enter a number (1‑10).")
         return True
-
     elif state["state"] == "waiting_study_hours":
         try:
             hours = float(text)
@@ -440,7 +432,6 @@ async def handle_daily_checkin_message(update: Update, context: ContextTypes.DEF
         except ValueError:
             await update.message.reply_text("Please enter a number (e.g., 8).")
         return True
-
     elif state["state"] == "waiting_homework":
         if text.lower() == "done":
             state["state"] = "waiting_skip"
@@ -451,27 +442,22 @@ async def handle_daily_checkin_message(update: Update, context: ContextTypes.DEF
                 await update.message.reply_text("No homework recorded.")
             await update.message.reply_text("🙅 Any homework tasks to skip? Send keywords/comma‑separated or type `none`.")
             return True
-
-        # Try to parse with AI first
         parsed = parse_homework_with_ai(text)
         if parsed and parsed.get("subject") and parsed.get("chapter"):
             subject = parsed["subject"]
             chapter = parsed["chapter"]
             exercises = parsed.get("exercises", {})
-            # Build chapter key
             chapter_key = f"{subject}_{chapter.replace(' ','_')}"
             if chapter_key not in memory["syllabus"]["chapters"]:
-                # add new chapter
                 sub = subject
                 if subject == "Chemistry":
-                    sub = "Physical"  # default; could improve later
+                    sub = "Physical"
                 memory["syllabus"]["chapters"][chapter_key] = {
                     "subject": subject, "chapter": chapter,
                     "class": 12, "status": "not_started", "sub_subject": sub
                 }
                 save_json("syllabus", memory["syllabus"])
                 await update.message.reply_text(f"📌 New chapter added: {subject} - {chapter}")
-            # validate exercises
             valid_exercises = {ex: count for ex, count in exercises.items() if ex in EXERCISE_TIMES and isinstance(count, (int,float))}
             if valid_exercises:
                 total_time = estimate_homework_time(valid_exercises)
@@ -489,19 +475,16 @@ async def handle_daily_checkin_message(update: Update, context: ContextTypes.DEF
                 state["homework"].append(task)
                 await update.message.reply_text(f"✅ Added homework for {subject} - {chapter} (est. {total_time} min). Send more or `done`.")
             else:
-                # Fallback to manual entry if no valid exercises
                 state["current_chapter"] = chapter_key
                 state["exercise_state"] = "waiting_types"
                 await update.message.reply_text(
                     f"📋 {subject} - {chapter}: exercise types? (O1,O2,O3,O4,JM,JA,Gyanoday)"
                 )
         else:
-            # Fallback: treat as chapter key or manual
             await update.message.reply_text(
                 "❌ Could not understand the input. Please use the format `Subject Chapter O1 count, O2 count, ...` or enter chapter key like `Physics_Electrostatics`."
             )
         return True
-
     elif state["state"] == "waiting_skip":
         if text.lower() == "none":
             state["skip_keywords"] = []
@@ -509,7 +492,6 @@ async def handle_daily_checkin_message(update: Update, context: ContextTypes.DEF
             state["skip_keywords"] = [kw.strip() for kw in text.split(",") if kw.strip()]
         await finalize_daily_checkin(update, context)
         return True
-
     return False
 
 async def finalize_daily_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -578,18 +560,7 @@ async def finalize_daily_checkin(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# ---------- Morning check-in trigger ----------
-async def morning_checkin_callback(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.chat_id
-    await start_daily_checkin(chat_id, context)
-
-# ---------- /start_day command ----------
-async def start_day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    daily_states.pop(chat_id, None)
-    await start_daily_checkin(chat_id, context)
-
-# ---------- test management ----------
+# ---------- Test management ----------
 def schedule_test_followups(app):
     if not app.job_queue: return
     next_date_str = memory["tests"].get("next_test_date")
@@ -618,44 +589,282 @@ async def ask_next_test_info(context):
         await context.bot.send_message(chat_id,
             "📅 Please set your next monthly test.\nSend: `Test Date (YYYY-MM-DD) | 11th Chapter Keys (comma separated)`")
 
-async def set_test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send: `Test Date (YYYY-MM-DD) | 11th Chapter Keys (comma separated)`")
-    context.user_data['mode'] = 'set_next_test'
+# ---------- Enhanced Natural Language Understanding ----------
+# Rule-based answers for common queries (fast path)
+def get_answer_from_memory(query_lower: str) -> str | None:
+    # Sleep/wake schedule
+    if re.search(r"(what|show|tell).* (sleep|wake).*schedule", query_lower):
+        sched = memory["schedule"]
+        return (f"Your schedule: wake up at {sched['wake_up']}, sleep at {sched['sleep']}. "
+                f"Target study hours: {sched['study_hours']}h/day.")
+    # Today's plan
+    if re.search(r"(what|show|tell).* (today'?s plan|todo|to-do|tasks? for today)", query_lower):
+        todo = memory["today"].get("todo", [])
+        if not todo:
+            return "Today's plan not generated yet. Use /start_day or wait for morning check-in."
+        lines = [f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in todo[:10]]
+        return "📅 Today's To‑Do:\n" + "\n".join(lines)
+    # Backlog
+    if re.search(r"(what|show|tell).*backlog", query_lower):
+        tasks = [t for t in memory["backlog"]["tasks"] if t["status"] != "done"]
+        if not tasks:
+            return "No pending backlog tasks."
+        return "📋 Backlog:\n" + "\n".join(f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in tasks[:10])
+    # Weak chapters
+    if re.search(r"(weak|difficult).* chapters?", query_lower):
+        weak = get_weak_chapters()
+        if not weak:
+            return "No weak chapters reported."
+        return f"⚠️ Weak chapters: {', '.join(weak[:5])}."
+    # Streak
+    if re.search(r"(streak|how many days in a row|current streak)", query_lower):
+        s = memory["stats"]
+        return f"🔥 Current streak: {s.get('streak',0)} days. Best: {s.get('longest_streak',0)} days."
+    # Weekly timetable
+    if re.search(r"(timetable|weekly schedule|class schedule)", query_lower):
+        tt = memory["schedule"].get("weekly_timetable")
+        if tt:
+            return f"📅 Weekly timetable:\n{tt[:400]}"
+        else:
+            return "No timetable saved. Use /week_update to set it."
+    # Next test
+    if re.search(r"(next test|upcoming test|test date)", query_lower):
+        next_test = memory["tests"].get("next_test_date")
+        if next_test:
+            return f"📅 Next test: {next_test}. 11th syllabus included: {len(memory['tests'].get('next_test_11th_syllabus', []))} chapters."
+        else:
+            return "No upcoming test set. Use /set_test."
+    return None
 
-async def handle_set_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# AI-based intent interpretation for everything else (informal, typos, complex)
+def interpret_with_ai(text: str) -> dict:
+    context = f"""
+Current memory:
+- Wake up: {memory['schedule']['wake_up']}
+- Sleep: {memory['schedule']['sleep']}
+- Study hours target: {memory['schedule']['study_hours']}
+- Today's plan generated: {memory['today'].get('generated', False)}
+- Pending backlog tasks: {len([t for t in memory['backlog']['tasks'] if t['status']!='done'])}
+- Weak chapters: {get_weak_chapters()[:5]}
+- Upcoming test: {memory['tests'].get('next_test_date', 'None')}
+"""
+    prompt = f"""
+You are JEE Study OS assistant. The user has sent a message that is not a command and not part of a guided flow.
+Your job is to understand the user's intent and return a JSON object.
+
+Possible intents:
+- "query": user wants to know something from their data (e.g., "what's my backlog?", "how many hours did I sleep?", "show my timetable")
+- "update": user wants to change a setting or add data (e.g., "set wake-up to 7am", "add backlog physics gravitation 45 min", "mark electrostatics as completed", "my mood is 8")
+- "chat": user just wants to talk or ask a general JEE question (e.g., "how to solve quadratic equations?", "I'm feeling demotivated")
+
+For "update", also specify the entity_type and value:
+- entity_type can be: "sleep", "wake", "study_hours", "backlog", "chapter_status", "mood", "none"
+- For backlog: value should be a dict with keys: subject, chapter, estimated_time (in minutes)
+- For chapter_status: value should be a dict with keys: chapter_key, status (one of not_started, going_on, completed, weak, revision_needed)
+- For sleep/wake/study_hours/mood: value should be a number (for sleep, study_hours, mood) or a string like "07:30" for wake
+
+Respond ONLY with valid JSON. Example responses:
+{{"intent": "query", "entity_type": "none", "value": null, "response": "Your backlog has 3 tasks totaling 2.5 hours."}}
+{{"intent": "update", "entity_type": "wake", "value": "06:30", "response": "Wake-up time set to 06:30."}}
+{{"intent": "chat", "entity_type": "none", "value": null, "response": "To solve a quadratic equation, use the formula x = [-b ± sqrt(b²-4ac)]/(2a)."}}
+
+User message: "{text}"
+
+Memory context: {context}
+"""
+    try:
+        resp = ask_ai(prompt)
+        # Find JSON in the response (may have extra text)
+        json_match = re.search(r'\{.*\}', resp, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group(0))
+    except Exception as e:
+        print(f"AI intent error: {e}")
+    # Fallback
+    return {"intent": "chat", "entity_type": "none", "value": None, "response": "I didn't understand that. Try using /help or rephrase."}
+
+async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Process any non-command, non-mode message. Returns True if handled."""
     text = update.message.text
-    parts = text.split('|')
-    if len(parts) >= 1:
-        date_str = parts[0].strip()
-        chaps_11th = []
-        if len(parts) > 1:
-            chaps_11th = [c.strip() for c in parts[1].split(',') if c.strip()]
-        try:
-            date.fromisoformat(date_str)
-        except:
-            await update.message.reply_text("Invalid date format. Use YYYY-MM-DD.")
-            return
-        memory["tests"]["next_test_date"] = date_str
-        memory["tests"]["next_test_11th_syllabus"] = chaps_11th
-        memory["tests"]["test_asked_today"] = False
-        save_json("tests", memory["tests"])
-        schedule_test_followups(context.application)
-        await update.message.reply_text("✅ Test set. Daily 11th revision tasks will now appear.")
-        context.user_data['mode'] = None
-    else:
-        await update.message.reply_text("Invalid format.")
+    text_lower = text.lower()
 
-# ---------- other commands ----------
+    # First try fast rule-based answers
+    answer = get_answer_from_memory(text_lower)
+    if answer:
+        await update.message.reply_text(answer)
+        return True
+
+    # Otherwise use AI to interpret intent
+    intent_data = interpret_with_ai(text)
+    intent = intent_data.get("intent")
+    entity = intent_data.get("entity_type")
+    value = intent_data.get("value")
+    response = intent_data.get("response", "")
+
+    if intent == "query":
+        await update.message.reply_text(response)
+        return True
+
+    elif intent == "update":
+        # Perform the update
+        if entity == "sleep":
+            try:
+                hours = float(value)
+                # Store as last_sleep_hours for future reference (not used in schedule but can be queried)
+                memory["schedule"]["last_sleep_hours"] = hours
+                save_json("schedule", memory["schedule"])
+                await update.message.reply_text(f"Got it. Your sleep last night: {hours} hours. Recommended: {RECOMMENDED_SLEEP}h.")
+            except:
+                await update.message.reply_text("Could not parse sleep hours. Please send a number like 7.")
+        elif entity == "wake":
+            if isinstance(value, str) and re.match(r'\d{1,2}:\d{2}', value):
+                memory["schedule"]["wake_up"] = value
+                save_json("schedule", memory["schedule"])
+                await update.message.reply_text(f"Wake-up time set to {value}. Morning check‑in will happen then.")
+            else:
+                await update.message.reply_text("Please use HH:MM format for wake-up time (e.g., 07:30).")
+        elif entity == "study_hours":
+            try:
+                hours = float(value)
+                memory["schedule"]["study_hours"] = hours
+                save_json("schedule", memory["schedule"])
+                await update.message.reply_text(f"Daily study target set to {hours} hours.")
+            except:
+                await update.message.reply_text("Please send a number for study hours.")
+        elif entity == "backlog":
+            if isinstance(value, dict):
+                subject = value.get("subject", "Unknown")
+                chapter = value.get("chapter", "Unknown")
+                est_time = value.get("estimated_time", 45)
+                task = {
+                    "id": str(int(datetime.timestamp(datetime.now()))),
+                    "subject": subject,
+                    "chapter": chapter,
+                    "type": "backlog",
+                    "estimated_time": est_time,
+                    "source": "natural",
+                    "status": "pending",
+                    "chapter_key": f"{subject}_{chapter.replace(' ','_')}"
+                }
+                memory["backlog"]["tasks"].append(task)
+                save_json("backlog", memory["backlog"])
+                await update.message.reply_text(f"Added backlog: {subject} - {chapter} ({est_time} min)")
+            else:
+                await update.message.reply_text("Could not understand backlog task. Try: 'add backlog physics gravitation 45 min'")
+        elif entity == "chapter_status":
+            if isinstance(value, dict):
+                key = value.get("chapter_key")
+                status = value.get("status")
+                if key and status in ("not_started","going_on","completed","weak","revision_needed"):
+                    if key in memory["syllabus"]["chapters"]:
+                        memory["syllabus"]["chapters"][key]["status"] = status
+                        save_json("syllabus", memory["syllabus"])
+                        await update.message.reply_text(f"Updated {key} status to {status}.")
+                    else:
+                        await update.message.reply_text(f"Chapter key '{key}' not found. Use /view_syllabus to see keys.")
+                else:
+                    await update.message.reply_text("Invalid chapter status. Valid: not_started, going_on, completed, weak, revision_needed")
+            else:
+                await update.message.reply_text("Could not parse chapter update. Example: 'mark electrostatics as completed'")
+        elif entity == "mood":
+            try:
+                mood_val = int(value)
+                if 1 <= mood_val <= 10:
+                    today_str = date.today().isoformat()
+                    mood_log = memory["stats"].get("mood_log", {})
+                    if today_str not in mood_log:
+                        mood_log[today_str] = {}
+                    mood_log[today_str]["mood"] = mood_val
+                    memory["stats"]["mood_log"] = mood_log
+                    save_json("stats", memory["stats"])
+                    await update.message.reply_text(f"Mood recorded: {mood_val}/10. Keep going!")
+                else:
+                    await update.message.reply_text("Mood must be 1‑10.")
+            except:
+                await update.message.reply_text("Please send a number for mood (1-10).")
+        else:
+            # Fallback: just reply with the AI-generated response (which may be a confirmation or error)
+            await update.message.reply_text(response or "Update done.")
+        return True
+
+    elif intent == "chat":
+        await update.message.reply_text(response)
+        return True
+
+    # If we reach here, nothing handled
+    return False
+
+# ---------- Periodic notifications ----------
+async def send_periodic_notification(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.chat_id
+    if chat_id is None:
+        return
+    now = datetime.now()
+    current_hour = now.hour
+    wake_hour = int(memory["schedule"]["wake_up"].split(":")[0])
+    sleep_hour = int(memory["schedule"]["sleep"].split(":")[0])
+    if not (wake_hour <= current_hour < sleep_hour):
+        return
+    msg_type = random.choice(["quote", "backlog", "progress", "checkin"])
+    if msg_type == "quote":
+        msg = random.choice(MOTIVATIONAL_QUOTES)
+    elif msg_type == "backlog":
+        pending = [t for t in memory["backlog"]["tasks"] if t["status"] != "done"]
+        if pending:
+            total_min = sum(t.get("estimated_time",45) for t in pending)
+            hours = total_min / 60
+            msg = f"📦 Backlog: {len(pending)} tasks, ~{hours:.1f} hours left. Keep chipping away!"
+        else:
+            msg = "🎉 No backlog! Great job. Want to review weak chapters?"
+    elif msg_type == "progress":
+        today_plan = memory["today"].get("todo", [])
+        if today_plan:
+            done_today = sum(1 for l in memory["progress"]["logs"] if l["timestamp"].startswith(date.today().isoformat()))
+            total_today = len(today_plan)
+            msg = f"📊 Today's progress: {done_today}/{total_today} tasks done. Keep going!"
+        else:
+            msg = "⏰ Don't forget to start your day with /start_day or wait for morning check‑in."
+    else:
+        msg = "😊 How is your study session? Reply with /mood <1-10> or /progress <hours studied>."
+    try:
+        await context.bot.send_message(chat_id, msg)
+    except Exception as e:
+        print(f"Notification error: {e}")
+
+def schedule_notifications(job_queue, chat_id, interval_minutes=120, enabled=True):
+    for job in job_queue.jobs():
+        if job.name == "periodic_notify" and job.chat_id == chat_id:
+            job.schedule_removal()
+    if enabled and interval_minutes > 0:
+        job_queue.run_repeating(
+            send_periodic_notification,
+            interval=interval_minutes * 60,
+            first=60,
+            chat_id=chat_id,
+            name="periodic_notify"
+        )
+        return True
+    return False
+
+# ---------- Command handlers ----------
 async def start(update, context):
-    await update.message.reply_text("🚀 JEE Study OS ready! /help for commands.")
-    context.bot_data["user_chat_id"] = update.effective_chat.id
+    chat_id = update.effective_chat.id
+    context.bot_data["user_chat_id"] = chat_id
+    if "notifications" not in memory["schedule"]:
+        memory["schedule"]["notifications"] = {"enabled": True, "interval_minutes": 120}
+        save_json("schedule", memory["schedule"])
+    notify_settings = memory["schedule"]["notifications"]
+    schedule_notifications(context.application.job_queue, chat_id,
+                          notify_settings["interval_minutes"],
+                          notify_settings["enabled"])
+    await update.message.reply_text("🚀 JEE Study OS ready! /help for commands.\nI'll send you periodic reminders.")
 
 async def help_cmd(update, context):
     text = """
 📚 JEE Study OS Commands
 
 🌅 Morning Check‑in: automatic at wake‑up time.
-/start_day – Manually start the daily check‑in (sleep, mood, homework, skip, to‑do).
+/start_day – Manually start daily check‑in.
 
 💬 /chat – AI chat (/stop to end)
 /ask <q> – One‑shot AI
@@ -674,8 +883,14 @@ async def help_cmd(update, context):
 /complete_task – Mark done
 /week_update – Timetable entry
 
-💡 During homework entry, you can now use natural language like:
-"Physics Electrostatics O1 30, O2 25, JM 20"
+🔔 Notifications:
+/notify on|off|interval <minutes>|status
+
+😊 Quick logs:
+/mood <1-10> – Record today's mood
+/progress <hours> – Log study hours
+
+💡 Natural language: Just ask me like "What's my backlog?" or "Set wake-up to 7am" – I understand informal language.
 """
     await update.message.reply_text(text)
 
@@ -731,6 +946,10 @@ async def view_tests_cmd(update, context):
     else:
         msg = "No upcoming test set. Use /set_test."
     await update.message.reply_text(msg)
+
+async def set_test_cmd(update, context):
+    await update.message.reply_text("Send: `Test Date (YYYY-MM-DD) | 11th Chapter Keys (comma separated)`")
+    context.user_data['mode'] = 'set_next_test'
 
 async def set_schedule_cmd(update, context):
     await update.message.reply_text("Send: `wake_up|sleep|study_hours`")
@@ -797,8 +1016,109 @@ async def view_plan(update, context):
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# ---------- message router ----------
-async def handle_message(update, context):
+async def start_day_cmd(update, context):
+    chat_id = update.effective_chat.id
+    daily_states.pop(chat_id, None)
+    await start_daily_checkin(chat_id, context)
+
+async def mood_cmd(update, context):
+    if context.args:
+        try:
+            mood = int(context.args[0])
+            if 1 <= mood <= 10:
+                today_str = date.today().isoformat()
+                mood_log = memory["stats"].get("mood_log", {})
+                if today_str not in mood_log:
+                    mood_log[today_str] = {}
+                mood_log[today_str]["mood"] = mood
+                memory["stats"]["mood_log"] = mood_log
+                save_json("stats", memory["stats"])
+                await update.message.reply_text(f"Mood recorded: {mood}/10. Stay strong!")
+            else:
+                await update.message.reply_text("Mood must be 1-10.")
+        except ValueError:
+            await update.message.reply_text("Send a number, e.g., /mood 8")
+    else:
+        await update.message.reply_text("Usage: /mood <1-10>")
+
+async def progress_cmd(update, context):
+    if context.args:
+        try:
+            hours = float(context.args[0])
+            update_streak_and_hours(hours)
+            await update.message.reply_text(f"✅ Logged {hours} study hour(s). Keep going!")
+        except ValueError:
+            await update.message.reply_text("Send a number, e.g., /progress 2.5")
+    else:
+        await update.message.reply_text("Usage: /progress <hours>")
+
+async def notify_cmd(update, context):
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /notify on|off|interval <minutes>|status")
+        return
+    action = args[0].lower()
+    chat_id = update.effective_chat.id
+    notify_settings = memory["schedule"].get("notifications", {"enabled": True, "interval_minutes": 120})
+    if action == "on":
+        notify_settings["enabled"] = True
+        memory["schedule"]["notifications"] = notify_settings
+        save_json("schedule", memory["schedule"])
+        schedule_notifications(context.application.job_queue, chat_id,
+                              notify_settings["interval_minutes"], True)
+        await update.message.reply_text("✅ Notifications enabled.")
+    elif action == "off":
+        notify_settings["enabled"] = False
+        memory["schedule"]["notifications"] = notify_settings
+        save_json("schedule", memory["schedule"])
+        schedule_notifications(context.application.job_queue, chat_id, 0, False)
+        await update.message.reply_text("🔕 Notifications disabled.")
+    elif action == "interval" and len(args) >= 2:
+        try:
+            interval = int(args[1])
+            if interval < 15:
+                await update.message.reply_text("Interval must be at least 15 minutes.")
+                return
+            notify_settings["interval_minutes"] = interval
+            memory["schedule"]["notifications"] = notify_settings
+            save_json("schedule", memory["schedule"])
+            schedule_notifications(context.application.job_queue, chat_id,
+                                  interval, notify_settings["enabled"])
+            await update.message.reply_text(f"⏲️ Notification interval set to {interval} minutes.")
+        except ValueError:
+            await update.message.reply_text("Please provide a number (minutes).")
+    elif action == "status":
+        enabled = notify_settings.get("enabled", True)
+        interval = notify_settings.get("interval_minutes", 120)
+        await update.message.reply_text(f"🔔 Notifications: {'ON' if enabled else 'OFF'}\n⏱️ Interval: {interval} minutes")
+    else:
+        await update.message.reply_text("Invalid. Use: /notify on|off|interval <minutes>|status")
+
+async def handle_set_test(update, context):
+    text = update.message.text
+    parts = text.split('|')
+    if len(parts) >= 1:
+        date_str = parts[0].strip()
+        chaps_11th = []
+        if len(parts) > 1:
+            chaps_11th = [c.strip() for c in parts[1].split(',') if c.strip()]
+        try:
+            date.fromisoformat(date_str)
+        except:
+            await update.message.reply_text("Invalid date format. Use YYYY-MM-DD.")
+            return
+        memory["tests"]["next_test_date"] = date_str
+        memory["tests"]["next_test_11th_syllabus"] = chaps_11th
+        memory["tests"]["test_asked_today"] = False
+        save_json("tests", memory["tests"])
+        schedule_test_followups(context.application)
+        await update.message.reply_text("✅ Test set. Daily 11th revision tasks will now appear.")
+        context.user_data['mode'] = None
+    else:
+        await update.message.reply_text("Invalid format.")
+
+# ---------- Main message router ----------
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.message.text.startswith('/'):
         return
@@ -915,9 +1235,13 @@ async def handle_message(update, context):
             await update.message.reply_text("Task not found.")
         context.user_data['mode'] = None
         return
-    await update.message.reply_text("I'm in coach mode. Use /help to see commands, or wait for your morning check‑in.")
 
-# ---------- PDF / schedule ----------
+    # Natural language fallback
+    handled = await handle_natural_language(update, context)
+    if not handled:
+        await update.message.reply_text("🤖 Use /help to see commands, or just ask me naturally (e.g., 'What's my backlog?', 'Set wake-up to 7am').")
+
+# ---------- PDF handling and schedule ----------
 async def weekly_schedule_prompt(context):
     chat_id = context.job.chat_id
     await context.bot.send_message(chat_id, "📅 It's Saturday! Please upload your class schedule PDF for batch CETQAS.")
@@ -960,10 +1284,15 @@ def schedule_morning_checkin(job_queue, wake_up_str, chat_id):
     wake_time = datetime.strptime(wake_up_str, "%H:%M").time()
     job_queue.run_daily(morning_checkin_callback, time=wake_time, chat_id=chat_id, name="morning_checkin")
 
+async def morning_checkin_callback(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.chat_id
+    await start_daily_checkin(chat_id, context)
+
 def schedule_weekly_pdf_prompt(job_queue, chat_id):
     job_queue.run_daily(weekly_schedule_prompt, time=datetime.strptime("08:00","%H:%M").time(),
                         days=(5,), chat_id=chat_id, name="weekly_pdf_prompt")
 
+# ---------- Health server for Render ----------
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
@@ -973,6 +1302,7 @@ def run_http_server():
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
+# ---------- Main ----------
 if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
@@ -996,6 +1326,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("week_update", week_update_cmd))
     app.add_handler(CommandHandler("start_day", start_day_cmd))
     app.add_handler(CommandHandler("view_plan", view_plan))
+    app.add_handler(CommandHandler("mood", mood_cmd))
+    app.add_handler(CommandHandler("progress", progress_cmd))
+    app.add_handler(CommandHandler("notify", notify_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     if app.job_queue:
