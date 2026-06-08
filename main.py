@@ -28,14 +28,19 @@ DATA_DIR = "/tmp/data" if os.getenv("RENDER") else "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 lock = threading.Lock()
 
-# ---------- memory ----------
-def load_json(name, default):
+# ---------- Safe JSON load with repair ----------
+def safe_load_json(name, default):
     path = os.path.join(DATA_DIR, f"{name}.json")
     if not os.path.exists(path):
         save_json(name, default)
         return default
-    with open(path, "r") as f:
-        return json.load(f)
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Corrupted {name}.json: {e}. Restoring default.")
+        save_json(name, default)
+        return default
 
 def save_json(name, data):
     path = os.path.join(DATA_DIR, f"{name}.json")
@@ -90,27 +95,27 @@ def init_syllabus():
     return chapters
 
 memory = {
-    "backlog": load_json("backlog", {"tasks": []}),
-    "today": load_json("today", {"date": "", "todo": [], "generated": False}),  # changed "plan" to "todo"
-    "schedule": load_json("schedule", {"wake_up": "07:00", "sleep": "22:00", "study_hours": 8,
-                                       "weekly_timetable": "", "last_updated": "",
-                                       "notifications": {"enabled": True, "interval_minutes": 120}}),
-    "progress": load_json("progress", {"logs": []}),
-    "stats": load_json("stats", {
+    "backlog": safe_load_json("backlog", {"tasks": []}),
+    "today": safe_load_json("today", {"date": "", "todo": [], "generated": False}),
+    "schedule": safe_load_json("schedule", {"wake_up": "07:00", "sleep": "22:00", "study_hours": 8,
+                                            "weekly_timetable": "", "last_updated": "",
+                                            "notifications": {"enabled": True, "interval_minutes": 120}}),
+    "progress": safe_load_json("progress", {"logs": []}),
+    "stats": safe_load_json("stats", {
         "productivity": [], "consistency": 0, "fatigue_flags": 0,
         "streak": 0, "longest_streak": 0, "last_study_date": "",
         "total_study_days": 0, "total_study_hours": 0.0,
         "weekly_hours": {}, "mood_log": {}
     }),
-    "syllabus": load_json("syllabus", {"chapters": init_syllabus()}),
-    "tests": load_json("tests", {
+    "syllabus": safe_load_json("syllabus", {"chapters": init_syllabus()}),
+    "tests": safe_load_json("tests", {
         "upcoming": [], "past": [],
         "next_test_date": None,
         "next_test_11th_syllabus": [],
         "test_asked_today": False
     }),
-    "homework": load_json("homework", {"date": "", "tasks": []}),
-    "chapter_exercises": load_json("chapter_exercises", {"exercises": {}}),
+    "homework": safe_load_json("homework", {"date": "", "tasks": []}),
+    "chapter_exercises": safe_load_json("chapter_exercises", {"exercises": {}}),
 }
 
 RECOMMENDED_SLEEP = 7.5
@@ -128,14 +133,14 @@ MOTIVATIONAL_QUOTES = [
 
 # ---------- helpers ----------
 def get_ongoing_chapters():
-    return [k for k,v in memory["syllabus"]["chapters"].items() if v["status"] == "going_on"]
+    return [k for k,v in memory["syllabus"]["chapters"].items() if v.get("status") == "going_on"]
 
 def get_weak_chapters():
-    return [k for k,v in memory["syllabus"]["chapters"].items() if v["status"] in ("weak","revision_needed")]
+    return [k for k,v in memory["syllabus"]["chapters"].items() if v.get("status") in ("weak","revision_needed")]
 
 def compute_priority(task, test_chapters, ongoing_chapters):
     score = 50
-    if task.get("test_link") in [t["name"] for t in memory["tests"]["upcoming"]]:
+    if task.get("test_link") in [t["name"] for t in memory["tests"].get("upcoming",[])]:
         score += 30
     chapter_key = task.get("chapter_key","")
     if chapter_key in test_chapters:
@@ -150,14 +155,14 @@ def compute_priority(task, test_chapters, ongoing_chapters):
 
 def should_skip_task(task, skip_keywords):
     if not skip_keywords: return False
-    text = (task.get("id","") + " " + task.get("description","")).lower()
+    text = (task.get("id","") + " " + task.get("description","") + " " + task.get("chapter","")).lower()
     for kw in skip_keywords:
         if kw.strip().lower() in text:
             return True
     return False
 
 def estimate_backlog_days(daily_hours):
-    pending = [t for t in memory["backlog"]["tasks"] if t["status"]!="done"]
+    pending = [t for t in memory["backlog"].get("tasks",[]) if t.get("status")!="done"]
     if not pending: return 0
     total_min = sum(t.get("estimated_time",45) for t in pending)
     if daily_hours<=0: daily_hours=1
@@ -177,7 +182,7 @@ def update_streak_and_hours(study_hours, mood=None, sleep_hours=None):
     if last:
         last_date = date.fromisoformat(last)
         if (date.today() - last_date).days == 1:
-            stats["streak"] += 1
+            stats["streak"] = stats.get("streak",0) + 1
         else:
             stats["streak"] = 1
     else:
@@ -193,7 +198,11 @@ def update_streak_and_hours(study_hours, mood=None, sleep_hours=None):
     stats["weekly_hours"] = weekly
     if mood is not None:
         mood_log = stats.get("mood_log",{})
-        mood_log[today] = {"mood": mood, "sleep": sleep_hours}
+        if today not in mood_log:
+            mood_log[today] = {}
+        mood_log[today]["mood"] = mood
+        if sleep_hours is not None:
+            mood_log[today]["sleep"] = sleep_hours
         stats["mood_log"] = mood_log
     save_json("stats", stats)
 
@@ -220,8 +229,8 @@ def generate_revision_tasks_for_11th():
         if chap:
             tasks.append({
                 "id": f"rev11_{ch_key}_{datetime.now().strftime('%Y%m%d')}",
-                "subject": chap["subject"],
-                "chapter": chap["chapter"],
+                "subject": chap.get("subject","Unknown"),
+                "chapter": chap.get("chapter","Unknown"),
                 "type": "11th Revision",
                 "estimated_time": 30,
                 "source": "test",
@@ -240,9 +249,9 @@ def generate_smart_revision_tasks(remaining_minutes):
         chap = memory["syllabus"]["chapters"].get(ch_key)
         if chap:
             tasks.append({
-                "id": f"revweak_{ch_key}_{datetime.now().strftime('%Y%m%d%H%M')}",
-                "subject": chap["subject"],
-                "chapter": chap["chapter"],
+                "id": f"revweak_{ch_key}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                "subject": chap.get("subject","Unknown"),
+                "chapter": chap.get("chapter","Unknown"),
                 "type": "Revision (Weak)",
                 "estimated_time": 30,
                 "source": "AI",
@@ -257,9 +266,9 @@ def generate_smart_revision_tasks(remaining_minutes):
         chap = memory["syllabus"]["chapters"].get(ch_key)
         if chap:
             tasks.append({
-                "id": f"revongo_{ch_key}_{datetime.now().strftime('%Y%m%d%H%M')}",
-                "subject": chap["subject"],
-                "chapter": chap["chapter"],
+                "id": f"revongo_{ch_key}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                "subject": chap.get("subject","Unknown"),
+                "chapter": chap.get("chapter","Unknown"),
                 "type": "Revision (Ongoing)",
                 "estimated_time": 30,
                 "source": "AI",
@@ -273,33 +282,40 @@ def generate_smart_revision_tasks(remaining_minutes):
 def generate_todo_list(study_hours_override=None, skip_keywords=None,
                        test_chapters=None, ongoing_chapters=None):
     try:
-        study_mins = (study_hours_override if study_hours_override else memory["schedule"]["study_hours"]) * 60
-        hw = memory["homework"]["tasks"] if memory["homework"]["date"] == datetime.now().strftime("%Y-%m-%d") else []
-        backlog = [t for t in memory["backlog"]["tasks"] if t["status"]!="done"]
+        study_mins = (float(study_hours_override) if study_hours_override else float(memory["schedule"]["study_hours"])) * 60
+        # Ensure homework tasks are a list
+        homework_tasks = memory["homework"].get("tasks", []) if memory["homework"].get("date") == datetime.now().strftime("%Y-%m-%d") else []
+        if not isinstance(homework_tasks, list):
+            homework_tasks = []
+        backlog_tasks = [t for t in memory["backlog"].get("tasks", []) if t.get("status") != "done"]
+        if not isinstance(backlog_tasks, list):
+            backlog_tasks = []
         if skip_keywords:
-            backlog = [t for t in backlog if not should_skip_task(t, skip_keywords)]
+            backlog_tasks = [t for t in backlog_tasks if not should_skip_task(t, skip_keywords)]
         if test_chapters is None: test_chapters = []
         if ongoing_chapters is None: ongoing_chapters = get_ongoing_chapters()
 
         revision_11th = generate_revision_tasks_for_11th()
-        all_mandatory = revision_11th + hw + backlog
+        all_mandatory = revision_11th + homework_tasks + backlog_tasks
         for t in all_mandatory:
+            if "estimated_time" not in t:
+                t["estimated_time"] = 30
             t["priority_score"] = compute_priority(t, test_chapters, ongoing_chapters)
-        all_mandatory.sort(key=lambda x: x["priority_score"], reverse=True)
+        all_mandatory.sort(key=lambda x: x.get("priority_score",0), reverse=True)
 
-        total_mandatory_min = sum(t["estimated_time"] for t in all_mandatory)
+        total_mandatory_min = sum(t.get("estimated_time",0) for t in all_mandatory)
         remaining = study_mins - total_mandatory_min
         smart_rev = []
         if remaining > 30:
             smart_rev = generate_smart_revision_tasks(remaining)
 
         full_list = all_mandatory + smart_rev
-        total_min = sum(t["estimated_time"] for t in full_list)
+        total_min = sum(t.get("estimated_time",0) for t in full_list)
 
         overflow_tasks = []
         if total_min > study_mins:
-            full_list.sort(key=lambda x: x["priority_score"])
-            while full_list and sum(t["estimated_time"] for t in full_list) > study_mins:
+            full_list.sort(key=lambda x: x.get("priority_score",0))
+            while full_list and sum(t.get("estimated_time",0) for t in full_list) > study_mins:
                 removed = full_list.pop(0)
                 overflow_tasks.append(removed)
             if overflow_tasks:
@@ -309,30 +325,31 @@ def generate_todo_list(study_hours_override=None, skip_keywords=None,
                     task["id"] = f"overflow_{task.get('id','')}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
                     memory["backlog"]["tasks"].append(task)
                 save_json("backlog", memory["backlog"])
-            total_min = sum(t["estimated_time"] for t in full_list)
-            full_list.sort(key=lambda x: x["priority_score"], reverse=True)
+            total_min = sum(t.get("estimated_time",0) for t in full_list)
+            full_list.sort(key=lambda x: x.get("priority_score",0), reverse=True)
 
         memory["today"] = {"date": datetime.now().strftime("%Y-%m-%d"), "todo": full_list, "generated": True}
         save_json("today", memory["today"])
         return full_list, total_min, study_mins, overflow_tasks
     except Exception as e:
         print(f"Error in generate_todo_list: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 # ---------- AI helpers (no sleep, added typing) ----------
 def ask_ai(prompt, chat_history=None):
     if not GROQ_KEY: return "AI not available."
-    # Removed time.sleep(1) for instant response
     weak = get_weak_chapters()[:5]
-    backlog_count = len([t for t in memory["backlog"]["tasks"] if t["status"]!="done"])
-    tests = [t["name"] for t in memory["tests"]["upcoming"]]
+    backlog_count = len([t for t in memory["backlog"].get("tasks",[]) if t.get("status")!="done"])
+    tests = [t.get("name","") for t in memory["tests"].get("upcoming",[])]
     context = f"""
 [SYSTEM MEMORY]
-Syllabus progress: {sum(1 for v in memory['syllabus']['chapters'].values() if v['status'] in ('completed','going_on'))} chapters completed/ongoing.
+Syllabus progress: {sum(1 for v in memory['syllabus']['chapters'].values() if v.get('status') in ('completed','going_on'))} chapters completed/ongoing.
 Weak topics: {weak}.
 Backlog tasks: {backlog_count}.
 Upcoming tests: {tests}.
-Today's plan: {'Generated' if memory['today']['generated'] else 'Not yet'}.
+Today's plan: {'Generated' if memory['today'].get('generated', False) else 'Not yet'}.
 """
     system_msg = "You are JEE Study OS, a strict Kota JEE coach. Answer using the memory context."
     messages = [{"role":"system","content": system_msg + "\n\n" + context}]
@@ -505,7 +522,6 @@ async def finalize_daily_checkin(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     try:
-        # Show typing indicator while generating plan
         await context.bot.send_chat_action(chat_id, action="typing")
 
         sleep_msg = ""
@@ -570,7 +586,9 @@ async def finalize_daily_checkin(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(msg, parse_mode='Markdown')
     except Exception as e:
         print(f"Error finalizing check-in: {e}")
-        await update.message.reply_text("❌ Error generating plan. Please try /start_day again. If the problem persists, contact support.")
+        import traceback
+        traceback.print_exc()
+        await update.message.reply_text(f"❌ Error generating plan: {str(e)[:100]}. Please try /start_day again. If the problem persists, contact support.")
 
 # ---------- Test management ----------
 def schedule_test_followups(app):
@@ -614,7 +632,7 @@ def get_answer_from_memory(query_lower: str) -> str | None:
         lines = [f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in todo[:10]]
         return "📅 Today's To‑Do:\n" + "\n".join(lines)
     if re.search(r"(what|show|tell).*backlog", query_lower):
-        tasks = [t for t in memory["backlog"]["tasks"] if t["status"] != "done"]
+        tasks = [t for t in memory["backlog"].get("tasks",[]) if t.get("status") != "done"]
         if not tasks:
             return "No pending backlog tasks."
         return "📋 Backlog:\n" + "\n".join(f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in tasks[:10])
@@ -647,7 +665,7 @@ Current memory:
 - Sleep: {memory['schedule']['sleep']}
 - Study hours target: {memory['schedule']['study_hours']}
 - Today's plan generated: {memory['today'].get('generated', False)}
-- Pending backlog tasks: {len([t for t in memory['backlog']['tasks'] if t['status']!='done'])}
+- Pending backlog tasks: {len([t for t in memory['backlog'].get('tasks',[]) if t.get('status')!='done'])}
 - Weak chapters: {get_weak_chapters()[:5]}
 - Upcoming test: {memory['tests'].get('next_test_date', 'None')}
 """
@@ -804,7 +822,7 @@ async def send_periodic_notification(context: ContextTypes.DEFAULT_TYPE):
     if msg_type == "quote":
         msg = random.choice(MOTIVATIONAL_QUOTES)
     elif msg_type == "backlog":
-        pending = [t for t in memory["backlog"]["tasks"] if t["status"] != "done"]
+        pending = [t for t in memory["backlog"].get("tasks",[]) if t.get("status") != "done"]
         if pending:
             total_min = sum(t.get("estimated_time",45) for t in pending)
             hours = total_min / 60
@@ -814,7 +832,7 @@ async def send_periodic_notification(context: ContextTypes.DEFAULT_TYPE):
     elif msg_type == "progress":
         today_plan = memory["today"].get("todo", [])
         if today_plan:
-            done_today = sum(1 for l in memory["progress"]["logs"] if l["timestamp"].startswith(date.today().isoformat()))
+            done_today = sum(1 for l in memory["progress"].get("logs",[]) if l.get("timestamp","").startswith(date.today().isoformat()))
             total_today = len(today_plan)
             msg = f"📊 Today's progress: {done_today}/{total_today} tasks done. Keep going!"
         else:
@@ -850,49 +868,43 @@ async def start(update, context):
         save_json("schedule", memory["schedule"])
     notify_settings = memory["schedule"]["notifications"]
     schedule_notifications(context.application.job_queue, chat_id,
-                          notify_settings["interval_minutes"],
-                          notify_settings["enabled"])
-    await update.message.reply_text("🚀 JEE Study OS ready! /help for commands.\nI'll send you periodic reminders.")
+                          notify_settings.get("interval_minutes",120),
+                          notify_settings.get("enabled",True))
+    await update.message.reply_text("🚀 JEE Study OS ready! You can talk to me naturally. /help for commands.")
 
 async def help_cmd(update, context):
     text = """
-📚 JEE Study OS Commands
+📚 **JEE Study OS – Your AI Coach**
 
-🌅 Morning Check‑in: automatic at wake‑up time.
-/start_day – Manually start daily check‑in.
+You can talk to me like a human. No need for /chat or special modes.
 
-💬 /chat – AI chat (/stop to end)
-/ask <q> – One‑shot AI
-/motivate – Random quote
-/stats – Streak & hours
-/week_report – This week's summary
-/set_test – Monthly test date & 11th syllabus
-/view_tests – Show upcoming test
+**Examples of natural conversation:**
+• *"What's my backlog?"*
+• *"Set my wake-up time to 7am"*
+• *"Add backlog Physics Gravitation 45 minutes"*
+• *"Mark Electrostatics as completed"*
+• *"My mood is 8"*
+• *"What is the formula for kinetic energy?"* (I'll answer from my knowledge)
+• *"How to solve quadratic equations?"* (I'll explain)
 
-📌 Manual:
-/set_schedule – wake|sleep|study_hours
-/add_backlog – Add backlog
-/view_backlog – Show backlog
-/update_syllabus – Change chapter status
-/view_syllabus – Full progress
-/complete_task – Mark done
-/week_update – Timetable entry
+**Commands (optional, for power users):**
+/start_day – Manual morning check‑in
+/stats – Your study streak and hours
+/view_plan – Today's to‑do list
+/set_test – Schedule a monthly test
+/view_syllabus – All chapters
+/add_backlog – Add backlog manually
+/notify – Configure periodic reminders
 
-🔔 Notifications:
-/notify on|off|interval <minutes>|status
-
-😊 Quick logs:
-/mood <1-10> – Record today's mood
-/progress <hours> – Log study hours
-
-💡 Natural language: Just ask me like "What's my backlog?" or "Set wake-up to 7am" – I understand informal language.
+I remember everything you tell me about your JEE preparation.
 """
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, parse_mode='Markdown')
 
 async def chat_cmd(update, context):
+    # This is kept for compatibility, but you don't need to use it
     context.user_data['mode'] = 'chat'
     context.user_data['chat_history'] = []
-    await update.message.reply_text("💬 Chat mode. /stop to end.")
+    await update.message.reply_text("💬 Chat mode active. You can also just talk normally without /chat. /stop to end.")
 
 async def stop_cmd(update, context):
     if context.user_data.get('mode') == 'chat':
@@ -913,7 +925,7 @@ async def stats_cmd(update, context):
     total_hours = s.get("total_study_hours",0)
     avg_hours = round(total_hours/total_days,1) if total_days else 0
     today_str = datetime.now().strftime("%Y-%m-%d")
-    done_today = sum(1 for l in memory["progress"]["logs"] if l["timestamp"].startswith(today_str))
+    done_today = sum(1 for l in memory["progress"].get("logs",[]) if l.get("timestamp","").startswith(today_str))
     mood = s.get("mood_log",{}).get(today_str,{}).get("mood","?")
     msg = (
         f"📊 *Your Stats*\n"
@@ -928,7 +940,7 @@ async def week_report_cmd(update, context):
     today = date.today()
     week_key = today.strftime("%Y-W%W")
     hours = memory["stats"].get("weekly_hours",{}).get(week_key,0)
-    week_logs = [l for l in memory["progress"]["logs"] if (today - date.fromisoformat(l["timestamp"][:10])).days < 7]
+    week_logs = [l for l in memory["progress"].get("logs",[]) if (today - date.fromisoformat(l["timestamp"][:10])).days < 7]
     tasks_done = len(week_logs)
     msg = f"📅 *This Week* – Hours: {hours} | Tasks: {tasks_done} | Streak: {memory['stats']['streak']}"
     await update.message.reply_text(msg, parse_mode='Markdown')
@@ -968,7 +980,7 @@ async def view_syllabus(update, context):
     weak = get_weak_chapters()
     ongoing = get_ongoing_chapters()
     msg = "📖 *Syllabus*\n" + "\n".join(
-        f"{'🟢' if v['status'] in ('completed','going_on') else '🔴' if v['status']=='weak' else '⚪'} {v['subject']} ({v.get('sub_subject','')}) - {v['chapter']} [{v['status']}]"
+        f"{'🟢' if v.get('status') in ('completed','going_on') else '🔴' if v.get('status')=='weak' else '⚪'} {v.get('subject','')} ({v.get('sub_subject','')}) - {v.get('chapter','')} [{v.get('status','')}]"
         for k,v in list(chaps.items())[:30])
     if ongoing:
         msg += "\n📌 Current: " + ", ".join(ongoing[:5])
@@ -977,11 +989,11 @@ async def view_syllabus(update, context):
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def view_backlog(update, context):
-    tasks = [t for t in memory["backlog"]["tasks"] if t["status"]!="done"]
+    tasks = [t for t in memory["backlog"].get("tasks",[]) if t.get("status")!="done"]
     if not tasks:
         await update.message.reply_text("No pending backlog.")
         return
-    msg = "📋 *Backlog*\n" + "\n".join(f"• {t['subject']} {t['chapter']} ({t['type']}) est.{t['estimated_time']}min" for t in tasks)
+    msg = "📋 *Backlog*\n" + "\n".join(f"• {t.get('subject','')} {t.get('chapter','')} ({t.get('type','')}) est.{t.get('estimated_time',0)}min" for t in tasks)
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def complete_task_cmd(update, context):
@@ -1002,16 +1014,16 @@ async def week_update_cmd(update, context):
     context.user_data['mode'] = 'weekly'
 
 async def view_plan(update, context):
-    today = memory["today"]
-    if not today.get("generated"):
+    today_plan = memory["today"]
+    if not today_plan.get("generated"):
         await update.message.reply_text("No to‑do list yet. Use /start_day or morning check‑in.")
         return
-    todo = today.get("todo", [])
+    todo = today_plan.get("todo", [])
     if not todo:
         await update.message.reply_text("No tasks for today. Great! Relax or revise weak topics.")
         return
     msg = "📅 *Today's To‑Do*\n" + "\n".join(
-        f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in todo
+        f"• {t.get('subject','')} - {t.get('chapter','')} ({t.get('type','')}) – {t.get('estimated_time',0)} min" for t in todo
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
@@ -1064,7 +1076,7 @@ async def notify_cmd(update, context):
         memory["schedule"]["notifications"] = notify_settings
         save_json("schedule", memory["schedule"])
         schedule_notifications(context.application.job_queue, chat_id,
-                              notify_settings["interval_minutes"], True)
+                              notify_settings.get("interval_minutes",120), True)
         await update.message.reply_text("✅ Notifications enabled.")
     elif action == "off":
         notify_settings["enabled"] = False
@@ -1082,7 +1094,7 @@ async def notify_cmd(update, context):
             memory["schedule"]["notifications"] = notify_settings
             save_json("schedule", memory["schedule"])
             schedule_notifications(context.application.job_queue, chat_id,
-                                  interval, notify_settings["enabled"])
+                                  interval, notify_settings.get("enabled",True))
             await update.message.reply_text(f"⏲️ Notification interval set to {interval} minutes.")
         except ValueError:
             await update.message.reply_text("Please provide a number (minutes).")
@@ -1234,7 +1246,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['mode'] = None
         return
 
-    # Natural language fallback
+    # Natural language fallback (always active)
     handled = await handle_natural_language(update, context)
     if not handled:
         await update.message.reply_text("🤖 Use /help to see commands, or just ask me naturally (e.g., 'What's my backlog?', 'Set wake-up to 7am').")
@@ -1331,7 +1343,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     if app.job_queue:
         schedule = memory["schedule"]
-        schedule_morning_checkin(app.job_queue, schedule["wake_up"], None)
+        schedule_morning_checkin(app.job_queue, schedule.get("wake_up","07:00"), None)
         schedule_weekly_pdf_prompt(app.job_queue, None)
         schedule_test_followups(app)
     print("Bot polling...")
