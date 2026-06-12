@@ -71,7 +71,6 @@ def init_syllabus():
         "Maths_Monotonicity": {"subject":"Maths","chapter":"Monotonicity Max/Min","class":12,"status":"weak","sub_subject":"Maths"},
         "Maths_Integral_Calculus": {"subject":"Maths","chapter":"Integral Calculus","class":12,"status":"going_on","sub_subject":"Maths"},
     }
-    # 11th defaults
     orig_physics = ["Units & Measurements","Motion in Straight Line","Motion in Plane","Laws of Motion","Work Energy Power","Rotational Motion","Gravitation","Mechanical Properties Solids","Mechanical Properties Fluids","Thermal Properties","Thermodynamics","Kinetic Theory","Oscillations","Waves"]
     orig_chem = ["Some Basic Concepts","Structure Atom","States Matter","Thermodynamics","Equilibrium","Redox Reactions","Electrochemistry","Chemical Kinetics","Surface Chemistry","Classification Periodicity","Hydrogen","s-Block","p-Block 11","Environmental","Metallurgy","p-Block 12","d & f Block","Chemical Bonding","Organic Basic Principles","Hydrocarbons","Haloalkanes","Alcohols Phenols Ethers","Aldehydes Ketones","Amines","Biomolecules","Polymers","Chemistry Everyday"]
     orig_maths = ["Sets","Relations Functions","Trigonometric Functions","Mathematical Induction","Complex Numbers","Linear Inequalities","Permutations Combinations","Binomial Theorem","Sequences Series","Straight Lines","Conic Sections","3D Geometry","Limits Derivatives","Mathematical Reasoning","Statistics","Probability 11"]
@@ -131,7 +130,7 @@ MOTIVATIONAL_QUOTES = [
     "“You don't have to be great to start, but you have to start to be great.” – Zig Ziglar",
 ]
 
-# ---------- helpers ----------
+# ---------- Helper functions ----------
 def get_ongoing_chapters():
     return [k for k,v in memory["syllabus"]["chapters"].items() if v.get("status") == "going_on"]
 
@@ -336,54 +335,239 @@ def generate_todo_list(study_hours_override=None, skip_keywords=None,
         traceback.print_exc()
         raise
 
-# ---------- AI helpers (no sleep, added typing) ----------
-def ask_ai(prompt, chat_history=None):
-    if not GROQ_KEY: return "AI not available."
-    weak = get_weak_chapters()[:5]
+# ---------- AI smart engine with conversation memory ----------
+conversation_memory: Dict[int, List[Dict]] = {}
+
+def get_conversation_context(chat_id: int) -> List[Dict]:
+    if chat_id not in conversation_memory:
+        return []
+    return conversation_memory[chat_id][-5:]
+
+def add_to_conversation(chat_id: int, role: str, content: str):
+    if chat_id not in conversation_memory:
+        conversation_memory[chat_id] = []
+    conversation_memory[chat_id].append({"role": role, "content": content})
+    if len(conversation_memory[chat_id]) > 10:
+        conversation_memory[chat_id] = conversation_memory[chat_id][-10:]
+
+def ask_ai_smart(user_message: str, chat_id: int) -> Dict:
+    if not GROQ_KEY:
+        return {"response": "AI not available. Please set GROQ_API_KEY.", "updates": []}
+    weak_topics = get_weak_chapters()[:5]
     backlog_count = len([t for t in memory["backlog"].get("tasks",[]) if t.get("status")!="done"])
-    tests = [t.get("name","") for t in memory["tests"].get("upcoming",[])]
-    context = f"""
-[SYSTEM MEMORY]
-Syllabus progress: {sum(1 for v in memory['syllabus']['chapters'].values() if v.get('status') in ('completed','going_on'))} chapters completed/ongoing.
-Weak topics: {weak}.
-Backlog tasks: {backlog_count}.
-Upcoming tests: {tests}.
-Today's plan: {'Generated' if memory['today'].get('generated', False) else 'Not yet'}.
+    upcoming_tests = memory["tests"].get("upcoming", [])
+    next_test_date = memory["tests"].get("next_test_date", "None")
+    syllabus_status = {k: v.get("status") for k, v in list(memory["syllabus"]["chapters"].items())[:20]}
+    context_str = f"""
+CURRENT MEMORY:
+- Wake up: {memory['schedule']['wake_up']}
+- Sleep: {memory['schedule']['sleep']}
+- Target study hours/day: {memory['schedule']['study_hours']}
+- Today's plan: {'Generated' if memory['today'].get('generated', False) else 'Not yet'}
+- Backlog tasks pending: {backlog_count}
+- Weak chapters: {weak_topics}
+- Upcoming tests: {[t.get('name') for t in upcoming_tests]}
+- Next monthly test date: {next_test_date}
+- Sample syllabus status: {syllabus_status}
+- Today's mood: {memory['stats'].get('mood_log', {}).get(date.today().isoformat(), {}).get('mood', 'Not recorded')}
 """
-    system_msg = "You are JEE Study OS, a strict Kota JEE coach. Answer using the memory context."
-    messages = [{"role":"system","content": system_msg + "\n\n" + context}]
-    if chat_history:
-        messages.extend(chat_history)
-    messages.append({"role":"user","content": prompt})
-    headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type":"application/json"}
-    payload = {"model": GROQ_MODEL, "messages": messages, "temperature":0.7, "max_tokens":500}
+    conv = get_conversation_context(chat_id)
+    conv_text = "\n".join([f"{m['role']}: {m['content']}" for m in conv]) if conv else "(No recent conversation)"
+    system_prompt = f"""You are JEE Study OS, a highly intelligent and proactive JEE coach. You have access to the student's memory (above). Your job is to:
+- Answer questions about the student's data (backlog, syllabus, schedule, stats, tests) using the memory.
+- Answer general JEE academic questions (Physics, Chemistry, Maths) using your own knowledge.
+- Update the student's data when they tell you to (e.g., "add backlog Physics Gravitation 45 min", "set wake-up to 7am", "my mood is 8").
+- Give proactive advice (e.g., "You have a test in 3 days, revise these weak topics", "You slept only 5 hours, try to rest more").
+- Be conversational, friendly, but strict like a coach.
+
+You MUST return a valid JSON object with two fields:
+- "response": the text you want to send back to the student.
+- "updates": a list of update objects. Each update object has:
+    * "action": one of ["add_backlog", "update_schedule", "update_syllabus_status", "record_mood", "add_homework", "set_test", "complete_task", "none"]
+    * "data": a dictionary with the required fields for that action.
+
+Example updates:
+- Add backlog: {{"action": "add_backlog", "data": {{"subject": "Physics", "chapter": "Gravitation", "estimated_time": 45}}}}
+- Update wake-up time: {{"action": "update_schedule", "data": {{"wake_up": "06:30"}}}}
+- Update chapter status: {{"action": "update_syllabus_status", "data": {{"chapter_key": "Physics_Electrostatics", "status": "completed"}}}}
+- Record mood: {{"action": "record_mood", "data": {{"mood": 8}}}}
+- Add homework: {{"action": "add_homework", "data": {{"subject": "Chemistry", "chapter": "Chemical Kinetics", "exercises": {{"O1": 30, "O2": 20}}}}}}
+- Set test: {{"action": "set_test", "data": {{"date": "2026-07-15", "chapters_11th": ["Physics_Units", "Chemistry_Some_Basic"]}}}}
+- Complete a task: {{"action": "complete_task", "data": {{"task_id_or_chapter": "Physics_Electrostatics"}}}}
+
+If no update is needed, send an empty list.
+
+Now, respond ONLY with valid JSON. Do not add any other text.
+
+Student message: {user_message}
+
+Recent conversation:
+{conv_text}
+
+Memory context:
+{context_str}
+"""
     try:
+        headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [{"role": "system", "content": system_prompt}],
+            "temperature": 0.5,
+            "max_tokens": 800,
+            "response_format": {"type": "json_object"}
+        }
         resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
-        if resp.status_code==200:
-            return resp.json()["choices"][0]["message"]["content"].strip()
+        if resp.status_code == 200:
+            result = resp.json()["choices"][0]["message"]["content"]
+            try:
+                data = json.loads(result)
+                return data
+            except json.JSONDecodeError:
+                print(f"Invalid JSON from AI: {result}")
+                return {"response": "Sorry, I had trouble understanding. Please rephrase.", "updates": []}
         else:
-            return f"AI error: {resp.status_code}"
+            print(f"AI error: {resp.status_code}")
+            return {"response": f"AI service error (status {resp.status_code}). Try again later.", "updates": []}
     except Exception as e:
-        return f"AI error: {str(e)}"
+        print(f"AI call exception: {e}")
+        return {"response": "Network error. Please try again.", "updates": []}
 
-def parse_homework_with_ai(text: str) -> Dict[str, Any] | None:
-    prompt = (
-        "Extract JEE homework details from the following user message. "
-        "Return a valid JSON object with keys: subject (Physics/Chemistry/Maths), "
-        "chapter (the name of the chapter), and exercises (a dictionary mapping exercise type "
-        "(O1,O2,O3,O4,JM,JA,Gyanoday) to the number of questions). "
-        "If any field is unclear, use null. The user message:\n" + text
-    )
-    try:
-        response = ask_ai(prompt)
-        match = re.search(r'\{.*\}', response, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-    except:
-        pass
-    return None
+def apply_updates(updates: List[Dict]) -> str:
+    results = []
+    for upd in updates:
+        action = upd.get("action")
+        data = upd.get("data", {})
+        if action == "add_backlog":
+            subject = data.get("subject")
+            chapter = data.get("chapter")
+            est_time = data.get("estimated_time", 45)
+            if subject and chapter:
+                task = {
+                    "id": str(int(datetime.timestamp(datetime.now()))),
+                    "subject": subject,
+                    "chapter": chapter,
+                    "type": "backlog",
+                    "estimated_time": est_time,
+                    "source": "AI",
+                    "status": "pending",
+                    "chapter_key": f"{subject}_{chapter.replace(' ','_')}"
+                }
+                memory["backlog"]["tasks"].append(task)
+                save_json("backlog", memory["backlog"])
+                results.append(f"Added backlog: {subject} - {chapter} ({est_time} min)")
+            else:
+                results.append("Could not add backlog: missing subject or chapter")
+        elif action == "update_schedule":
+            changed = []
+            if "wake_up" in data:
+                memory["schedule"]["wake_up"] = data["wake_up"]
+                changed.append(f"wake-up to {data['wake_up']}")
+            if "sleep" in data:
+                memory["schedule"]["sleep"] = data["sleep"]
+                changed.append(f"sleep to {data['sleep']}")
+            if "study_hours" in data:
+                memory["schedule"]["study_hours"] = data["study_hours"]
+                changed.append(f"study hours to {data['study_hours']}")
+            if changed:
+                save_json("schedule", memory["schedule"])
+                results.append(f"Schedule updated: {', '.join(changed)}")
+            else:
+                results.append("No schedule changes")
+        elif action == "update_syllabus_status":
+            key = data.get("chapter_key")
+            status = data.get("status")
+            if key and status in ("not_started","going_on","completed","weak","revision_needed"):
+                if key in memory["syllabus"]["chapters"]:
+                    memory["syllabus"]["chapters"][key]["status"] = status
+                    save_json("syllabus", memory["syllabus"])
+                    results.append(f"Chapter {key} marked as {status}")
+                else:
+                    results.append(f"Chapter key {key} not found")
+            else:
+                results.append("Invalid chapter update")
+        elif action == "record_mood":
+            mood = data.get("mood")
+            if isinstance(mood, int) and 1 <= mood <= 10:
+                today_str = date.today().isoformat()
+                mood_log = memory["stats"].get("mood_log", {})
+                if today_str not in mood_log:
+                    mood_log[today_str] = {}
+                mood_log[today_str]["mood"] = mood
+                memory["stats"]["mood_log"] = mood_log
+                save_json("stats", memory["stats"])
+                results.append(f"Mood recorded: {mood}/10")
+            else:
+                results.append("Invalid mood value (must be 1-10)")
+        elif action == "add_homework":
+            subject = data.get("subject")
+            chapter = data.get("chapter")
+            exercises = data.get("exercises", {})
+            if subject and chapter and exercises:
+                chapter_key = f"{subject}_{chapter.replace(' ','_')}"
+                if chapter_key not in memory["syllabus"]["chapters"]:
+                    sub = subject if subject != "Chemistry" else "Physical"
+                    memory["syllabus"]["chapters"][chapter_key] = {
+                        "subject": subject, "chapter": chapter,
+                        "class": 12, "status": "not_started", "sub_subject": sub
+                    }
+                    save_json("syllabus", memory["syllabus"])
+                total_time = estimate_homework_time(exercises)
+                task = {
+                    "id": str(int(datetime.timestamp(datetime.now()))),
+                    "subject": subject,
+                    "chapter": chapter,
+                    "type": "mixed",
+                    "estimated_time": total_time,
+                    "source": "AI",
+                    "status": "pending",
+                    "chapter_key": chapter_key,
+                    "exercise_counts": exercises
+                }
+                memory["backlog"]["tasks"].append(task)
+                save_json("backlog", memory["backlog"])
+                results.append(f"Added homework for {subject} - {chapter} ({total_time} min)")
+            else:
+                results.append("Could not add homework: missing fields")
+        elif action == "set_test":
+            date_str = data.get("date")
+            chapters_11th = data.get("chapters_11th", [])
+            if date_str:
+                try:
+                    date.fromisoformat(date_str)
+                    memory["tests"]["next_test_date"] = date_str
+                    memory["tests"]["next_test_11th_syllabus"] = chapters_11th
+                    save_json("tests", memory["tests"])
+                    results.append(f"Test set for {date_str} with {len(chapters_11th)} 11th chapters")
+                except:
+                    results.append("Invalid test date format")
+            else:
+                results.append("Missing test date")
+        elif action == "complete_task":
+            task_ref = data.get("task_id_or_chapter")
+            if task_ref:
+                today_plan = memory["today"].get("todo", [])
+                found = False
+                for task in today_plan:
+                    if task_ref.lower() in task.get("id","").lower() or task_ref.lower() in task.get("chapter","").lower():
+                        task["status"] = "done"
+                        found = True
+                        memory["progress"]["logs"].append({
+                            "task_id": task["id"],
+                            "description": f"{task['subject']} - {task['chapter']}",
+                            "timestamp": datetime.now().isoformat()
+                        })
+                        save_json("progress", memory["progress"])
+                        results.append(f"Task '{task_ref}' marked done")
+                        break
+                if not found:
+                    results.append(f"Task '{task_ref}' not found in today's plan")
+            else:
+                results.append("Missing task reference")
+        else:
+            results.append(f"Unknown action: {action}")
+    return "\n".join(results) if results else ""
 
-# ---------- Daily check-in state ----------
+# ---------- Daily check-in state and handlers ----------
 daily_states: Dict[int, Dict[str, Any]] = {}
 
 async def start_daily_checkin(chat_id, context):
@@ -461,48 +645,37 @@ async def handle_daily_checkin_message(update: Update, context: ContextTypes.DEF
                 await update.message.reply_text("No homework recorded.")
             await update.message.reply_text("🙅 Any homework tasks to skip? Send keywords/comma‑separated or type `none`.")
             return True
-        parsed = parse_homework_with_ai(text)
-        if parsed and parsed.get("subject") and parsed.get("chapter"):
-            subject = parsed["subject"]
-            chapter = parsed["chapter"]
-            exercises = parsed.get("exercises", {})
+        # Simple parsing for "Subject Chapter O1 count" format (can be extended)
+        match = re.match(r"(\w+)\s+(\w+)\s+O1\s+(\d+)", text, re.IGNORECASE)
+        if match:
+            subject = match.group(1)
+            chapter = match.group(2)
+            o1_count = int(match.group(3))
+            exercises = {"O1": o1_count}
             chapter_key = f"{subject}_{chapter.replace(' ','_')}"
             if chapter_key not in memory["syllabus"]["chapters"]:
-                sub = subject
-                if subject == "Chemistry":
-                    sub = "Physical"
+                sub = subject if subject != "Chemistry" else "Physical"
                 memory["syllabus"]["chapters"][chapter_key] = {
                     "subject": subject, "chapter": chapter,
                     "class": 12, "status": "not_started", "sub_subject": sub
                 }
                 save_json("syllabus", memory["syllabus"])
-                await update.message.reply_text(f"📌 New chapter added: {subject} - {chapter}")
-            valid_exercises = {ex: count for ex, count in exercises.items() if ex in EXERCISE_TIMES and isinstance(count, (int,float))}
-            if valid_exercises:
-                total_time = estimate_homework_time(valid_exercises)
-                task = {
-                    "id": str(int(datetime.timestamp(datetime.now()))),
-                    "subject": subject,
-                    "chapter": chapter,
-                    "type": "mixed",
-                    "estimated_time": total_time,
-                    "source": "coaching",
-                    "status": "pending",
-                    "chapter_key": chapter_key,
-                    "exercise_counts": valid_exercises
-                }
-                state["homework"].append(task)
-                await update.message.reply_text(f"✅ Added homework for {subject} - {chapter} (est. {total_time} min). Send more or `done`.")
-            else:
-                state["current_chapter"] = chapter_key
-                state["exercise_state"] = "waiting_types"
-                await update.message.reply_text(
-                    f"📋 {subject} - {chapter}: exercise types? (O1,O2,O3,O4,JM,JA,Gyanoday)"
-                )
+            total_time = estimate_homework_time(exercises)
+            task = {
+                "id": str(int(datetime.timestamp(datetime.now()))),
+                "subject": subject,
+                "chapter": chapter,
+                "type": "mixed",
+                "estimated_time": total_time,
+                "source": "coaching",
+                "status": "pending",
+                "chapter_key": chapter_key,
+                "exercise_counts": exercises
+            }
+            state["homework"].append(task)
+            await update.message.reply_text(f"✅ Added homework for {subject} - {chapter} (est. {total_time} min). Send more or `done`.")
         else:
-            await update.message.reply_text(
-                "❌ Could not understand the input. Please use the format `Subject Chapter O1 count, O2 count, ...` or enter chapter key like `Physics_Electrostatics`."
-            )
+            await update.message.reply_text("Could not understand. Use format: `Subject Chapter O1 count` or type `done`.")
         return True
     elif state["state"] == "waiting_skip":
         if text.lower() == "none":
@@ -519,10 +692,8 @@ async def finalize_daily_checkin(update: Update, context: ContextTypes.DEFAULT_T
     if not state:
         await update.message.reply_text("❌ Session expired. Please use /start_day again.")
         return
-
     try:
         await context.bot.send_chat_action(chat_id, action="typing")
-
         sleep_msg = ""
         if state["sleep"] is not None:
             diff = state["sleep"] - RECOMMENDED_SLEEP
@@ -532,10 +703,8 @@ async def finalize_daily_checkin(update: Update, context: ContextTypes.DEFAULT_T
                 sleep_msg = f"You slept {state['sleep']}h — less than the recommended {RECOMMENDED_SLEEP}h."
             else:
                 sleep_msg = f"You slept {state['sleep']}h — adequate."
-
         memory["homework"] = {"date": datetime.now().strftime("%Y-%m-%d"), "tasks": state["homework"]}
         save_json("homework", memory["homework"])
-
         study_hours = state["study_hours"] if state["study_hours"] else memory["schedule"]["study_hours"]
         todo, total_est, avail_mins, overflow = generate_todo_list(
             study_hours_override=study_hours,
@@ -543,9 +712,7 @@ async def finalize_daily_checkin(update: Update, context: ContextTypes.DEFAULT_T
         )
         daily_hrs = study_hours
         days = estimate_backlog_days(daily_hrs)
-
         update_streak_and_hours(daily_hrs, mood=state["mood"], sleep_hours=state["sleep"])
-
         wake = state["wake_time"] or memory["schedule"]["wake_up"]
         try:
             wake_dt = datetime.strptime(wake, "%H:%M")
@@ -561,13 +728,11 @@ async def finalize_daily_checkin(update: Update, context: ContextTypes.DEFAULT_T
         morning_hours = max(0, 12 - wake_hours)
         evening_hours = max(0, sleep_hours_val - 20)
         total_free = round(morning_hours + evening_hours, 1)
-
         def emoji(score):
             if score >= 80: return "🔴"
             if score >= 60: return "🟠"
             if score >= 40: return "🟡"
             return "🟢"
-
         msg = f"{sleep_msg}\n\n📅 *Today's To‑Do List* (Classes: 12 PM – 8 PM)\n"
         msg += f"🕒 Free hours: ~{total_free}h (morning {morning_hours}h + evening {evening_hours}h)\n"
         msg += f"⏱️ Total task time: {total_est} min ({total_est/60:.1f}h)\n"
@@ -581,13 +746,12 @@ async def finalize_daily_checkin(update: Update, context: ContextTypes.DEFAULT_T
         for task in todo:
             msg += f"{emoji(task.get('priority_score',50))} {task['subject']} - {task['chapter']} ({task['type']}) – {task['estimated_time']} min\n"
         msg += f"\n⏳ *Backlog estimate:* ~{days} day(s) at {daily_hrs}h/day."
-
         await update.message.reply_text(msg, parse_mode='Markdown')
     except Exception as e:
         print(f"Error finalizing check-in: {e}")
         import traceback
         traceback.print_exc()
-        await update.message.reply_text(f"❌ Error generating plan: {str(e)[:100]}. Please try /start_day again. If the problem persists, contact support.")
+        await update.message.reply_text(f"❌ Error generating plan: {str(e)[:100]}. Please try /start_day again.")
 
 # ---------- Test management ----------
 def schedule_test_followups(app):
@@ -617,197 +781,6 @@ async def ask_next_test_info(context):
     if chat_id:
         await context.bot.send_message(chat_id,
             "📅 Please set your next monthly test.\nSend: `Test Date (YYYY-MM-DD) | 11th Chapter Keys (comma separated)`")
-
-# ---------- Enhanced Natural Language Understanding ----------
-def get_answer_from_memory(query_lower: str) -> str | None:
-    if re.search(r"(what|show|tell).* (sleep|wake).*schedule", query_lower):
-        sched = memory["schedule"]
-        return (f"Your schedule: wake up at {sched['wake_up']}, sleep at {sched['sleep']}. "
-                f"Target study hours: {sched['study_hours']}h/day.")
-    if re.search(r"(what|show|tell).* (today'?s plan|todo|to-do|tasks? for today)", query_lower):
-        todo = memory["today"].get("todo", [])
-        if not todo:
-            return "Today's plan not generated yet. Use /start_day or wait for morning check-in."
-        lines = [f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in todo[:10]]
-        return "📅 Today's To‑Do:\n" + "\n".join(lines)
-    if re.search(r"(what|show|tell).*backlog", query_lower):
-        tasks = [t for t in memory["backlog"].get("tasks",[]) if t.get("status") != "done"]
-        if not tasks:
-            return "No pending backlog tasks."
-        return "📋 Backlog:\n" + "\n".join(f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in tasks[:10])
-    if re.search(r"(weak|difficult).* chapters?", query_lower):
-        weak = get_weak_chapters()
-        if not weak:
-            return "No weak chapters reported."
-        return f"⚠️ Weak chapters: {', '.join(weak[:5])}."
-    if re.search(r"(streak|how many days in a row|current streak)", query_lower):
-        s = memory["stats"]
-        return f"🔥 Current streak: {s.get('streak',0)} days. Best: {s.get('longest_streak',0)} days."
-    if re.search(r"(timetable|weekly schedule|class schedule)", query_lower):
-        tt = memory["schedule"].get("weekly_timetable")
-        if tt:
-            return f"📅 Weekly timetable:\n{tt[:400]}"
-        else:
-            return "No timetable saved. Use /week_update to set it."
-    if re.search(r"(next test|upcoming test|test date)", query_lower):
-        next_test = memory["tests"].get("next_test_date")
-        if next_test:
-            return f"📅 Next test: {next_test}. 11th syllabus included: {len(memory['tests'].get('next_test_11th_syllabus', []))} chapters."
-        else:
-            return "No upcoming test set. Use /set_test."
-    return None
-
-def interpret_with_ai(text: str) -> dict:
-    context = f"""
-Current memory:
-- Wake up: {memory['schedule']['wake_up']}
-- Sleep: {memory['schedule']['sleep']}
-- Study hours target: {memory['schedule']['study_hours']}
-- Today's plan generated: {memory['today'].get('generated', False)}
-- Pending backlog tasks: {len([t for t in memory['backlog'].get('tasks',[]) if t.get('status')!='done'])}
-- Weak chapters: {get_weak_chapters()[:5]}
-- Upcoming test: {memory['tests'].get('next_test_date', 'None')}
-"""
-    prompt = f"""
-You are JEE Study OS assistant. The user has sent a message that is not a command and not part of a guided flow.
-Your job is to understand the user's intent and return a JSON object.
-
-Possible intents:
-- "query": user wants to know something from their data (e.g., "what's my backlog?", "how many hours did I sleep?", "show my timetable")
-- "update": user wants to change a setting or add data (e.g., "set wake-up to 7am", "add backlog physics gravitation 45 min", "mark electrostatics as completed", "my mood is 8")
-- "chat": user just wants to talk or ask a general JEE question (e.g., "how to solve quadratic equations?", "I'm feeling demotivated")
-
-For "update", also specify the entity_type and value:
-- entity_type can be: "sleep", "wake", "study_hours", "backlog", "chapter_status", "mood", "none"
-- For backlog: value should be a dict with keys: subject, chapter, estimated_time (in minutes)
-- For chapter_status: value should be a dict with keys: chapter_key, status (one of not_started, going_on, completed, weak, revision_needed)
-- For sleep/wake/study_hours/mood: value should be a number (for sleep, study_hours, mood) or a string like "07:30" for wake
-
-Respond ONLY with valid JSON. Example responses:
-{{"intent": "query", "entity_type": "none", "value": null, "response": "Your backlog has 3 tasks totaling 2.5 hours."}}
-{{"intent": "update", "entity_type": "wake", "value": "06:30", "response": "Wake-up time set to 06:30."}}
-{{"intent": "chat", "entity_type": "none", "value": null, "response": "To solve a quadratic equation, use the formula x = [-b ± sqrt(b²-4ac)]/(2a)."}}
-
-User message: "{text}"
-
-Memory context: {context}
-"""
-    try:
-        resp = ask_ai(prompt)
-        json_match = re.search(r'\{.*\}', resp, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group(0))
-    except Exception as e:
-        print(f"AI intent error: {e}")
-    return {"intent": "chat", "entity_type": "none", "value": None, "response": "I didn't understand that. Try using /help or rephrase."}
-
-async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    text = update.message.text
-    text_lower = text.lower()
-
-    answer = get_answer_from_memory(text_lower)
-    if answer:
-        await update.message.reply_text(answer)
-        return True
-
-    await context.bot.send_chat_action(update.effective_chat.id, action="typing")
-
-    intent_data = interpret_with_ai(text)
-    intent = intent_data.get("intent")
-    entity = intent_data.get("entity_type")
-    value = intent_data.get("value")
-    response = intent_data.get("response", "")
-
-    if intent == "query":
-        await update.message.reply_text(response)
-        return True
-    elif intent == "update":
-        if entity == "sleep":
-            try:
-                hours = float(value)
-                memory["schedule"]["last_sleep_hours"] = hours
-                save_json("schedule", memory["schedule"])
-                await update.message.reply_text(f"Got it. Your sleep last night: {hours} hours. Recommended: {RECOMMENDED_SLEEP}h.")
-            except:
-                await update.message.reply_text("Could not parse sleep hours. Please send a number like 7.")
-        elif entity == "wake":
-            if isinstance(value, str) and re.match(r'\d{1,2}:\d{2}', value):
-                memory["schedule"]["wake_up"] = value
-                save_json("schedule", memory["schedule"])
-                # Re-schedule morning check-in with new time
-                for job in context.application.job_queue.jobs():
-                    if job.name == "morning_checkin" and job.chat_id == update.effective_chat.id:
-                        job.schedule_removal()
-                schedule_morning_checkin(context.application.job_queue, value, update.effective_chat.id)
-                await update.message.reply_text(f"Wake-up time set to {value}. Morning check‑in will happen then.")
-            else:
-                await update.message.reply_text("Please use HH:MM format for wake-up time (e.g., 07:30).")
-        elif entity == "study_hours":
-            try:
-                hours = float(value)
-                memory["schedule"]["study_hours"] = hours
-                save_json("schedule", memory["schedule"])
-                await update.message.reply_text(f"Daily study target set to {hours} hours.")
-            except:
-                await update.message.reply_text("Please send a number for study hours.")
-        elif entity == "backlog":
-            if isinstance(value, dict):
-                subject = value.get("subject", "Unknown")
-                chapter = value.get("chapter", "Unknown")
-                est_time = value.get("estimated_time", 45)
-                task = {
-                    "id": str(int(datetime.timestamp(datetime.now()))),
-                    "subject": subject,
-                    "chapter": chapter,
-                    "type": "backlog",
-                    "estimated_time": est_time,
-                    "source": "natural",
-                    "status": "pending",
-                    "chapter_key": f"{subject}_{chapter.replace(' ','_')}"
-                }
-                memory["backlog"]["tasks"].append(task)
-                save_json("backlog", memory["backlog"])
-                await update.message.reply_text(f"Added backlog: {subject} - {chapter} ({est_time} min)")
-            else:
-                await update.message.reply_text("Could not understand backlog task. Try: 'add backlog physics gravitation 45 min'")
-        elif entity == "chapter_status":
-            if isinstance(value, dict):
-                key = value.get("chapter_key")
-                status = value.get("status")
-                if key and status in ("not_started","going_on","completed","weak","revision_needed"):
-                    if key in memory["syllabus"]["chapters"]:
-                        memory["syllabus"]["chapters"][key]["status"] = status
-                        save_json("syllabus", memory["syllabus"])
-                        await update.message.reply_text(f"Updated {key} status to {status}.")
-                    else:
-                        await update.message.reply_text(f"Chapter key '{key}' not found. Use /view_syllabus to see keys.")
-                else:
-                    await update.message.reply_text("Invalid chapter status. Valid: not_started, going_on, completed, weak, revision_needed")
-            else:
-                await update.message.reply_text("Could not parse chapter update. Example: 'mark electrostatics as completed'")
-        elif entity == "mood":
-            try:
-                mood_val = int(value)
-                if 1 <= mood_val <= 10:
-                    today_str = date.today().isoformat()
-                    mood_log = memory["stats"].get("mood_log", {})
-                    if today_str not in mood_log:
-                        mood_log[today_str] = {}
-                    mood_log[today_str]["mood"] = mood_val
-                    memory["stats"]["mood_log"] = mood_log
-                    save_json("stats", memory["stats"])
-                    await update.message.reply_text(f"Mood recorded: {mood_val}/10. Keep going!")
-                else:
-                    await update.message.reply_text("Mood must be 1‑10.")
-            except:
-                await update.message.reply_text("Please send a number for mood (1-10).")
-        else:
-            await update.message.reply_text(response or "Update done.")
-        return True
-    elif intent == "chat":
-        await update.message.reply_text(response)
-        return True
-    return False
 
 # ---------- Periodic notifications ----------
 async def send_periodic_notification(context: ContextTypes.DEFAULT_TYPE):
@@ -872,57 +845,47 @@ async def start(update, context):
     schedule_notifications(context.application.job_queue, chat_id,
                           notify_settings.get("interval_minutes",120),
                           notify_settings.get("enabled",True))
-    # Schedule morning check-in for this user
     wake_up = memory["schedule"].get("wake_up", "07:00")
     schedule_morning_checkin(context.application.job_queue, wake_up, chat_id)
+    schedule_weekly_pdf_prompt(context.application.job_queue, chat_id)
     await update.message.reply_text(
-        "🚀 JEE Study OS ready!\n\n"
-        "I will automatically ask you for your daily check‑in every morning at your wake‑up time.\n"
-        "You can also start it manually with /start_day.\n\n"
-        "Just talk to me naturally – I understand questions like 'What's my backlog?' and commands like 'Set wake-up to 7am'.\n"
-        "Type /help for all features."
+        "🚀 **JEE Study OS – Super Smart AI Coach**\n\n"
+        "I now understand natural conversation, remember our chat, and can update your data automatically.\n\n"
+        "Try saying:\n"
+        "• *'What's my backlog?'*\n"
+        "• *'Add backlog Physics Gravitation 45 minutes'*\n"
+        "• *'Mark Electrostatics as completed'*\n"
+        "• *'My mood is 8'*\n"
+        "• *'How to solve quadratic equations?'*\n\n"
+        "I will also ask you every morning about your sleep, mood, and homework.\n"
+        "Type /help for all commands.",
+        parse_mode='Markdown'
     )
-
-async def test_morning_cmd(update, context):
-    """Hidden command to manually trigger morning check-in (for debugging)."""
-    chat_id = update.effective_chat.id
-    await start_daily_checkin(chat_id, context)
 
 async def help_cmd(update, context):
     text = """
-📚 **JEE Study OS – Your AI Coach**
+📚 **JEE Study OS – Super Smart AI Coach**
+
+**💬 Natural Conversation** – Just talk to me like a human. I remember our chat and can:
+- Answer questions about your data (backlog, syllabus, schedule, stats)
+- Update your data (add backlog, change wake‑up time, mark chapters completed, record mood)
+- Answer academic JEE questions (Physics, Chemistry, Maths)
+- Give proactive advice based on your mood, backlog, and upcoming tests
 
 **🌅 Daily Routine** – Every morning at your wake‑up time, I'll ask you:
-- How many hours you slept
-- Your wake‑up time
-- Your mood (1‑10)
-- How many hours you plan to study
-- Your homework (natural language, e.g., "Physics Electrostatics O1 30, O2 25")
-- Any tasks to skip
+- Sleep hours, wake time, mood, study hours, homework, tasks to skip
 
-Then I generate your complete to‑do list for the day, including backlog, test revision, and weak‑topic revision.
-
-**💬 Natural Conversation** – No need for `/chat`. Just talk to me:
-- *"What's my backlog?"*
-- *"Set wake-up to 7am"*
-- *"Add backlog Physics Gravitation 45 minutes"*
-- *"Mark Electrostatics as completed"*
-- *"My mood is 8"*
-- *"How to solve quadratic equations?"* (academic help)
-
-**🔧 Commands** (optional, for power users):
+**🔧 Commands** (optional):
 /start_day – Manually start morning check‑in
 /view_plan – Today's to‑do list
 /stats – Study streak and hours
-/week_report – Weekly summary
-/set_test – Schedule a monthly test (with 11th syllabus)
+/set_test – Schedule a monthly test
 /view_syllabus – Full syllabus progress
-/add_backlog – Add backlog manually
 /notify – Configure periodic reminders
 /mood <1-10> – Quick mood log
 /progress <hours> – Log study hours
 
-I remember everything you tell me about your JEE preparation.
+**💡 Proactive advice**: I'll notify you if you're falling behind, have a test soon, or need rest.
 """
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -1031,8 +994,8 @@ async def ask_cmd(update, context):
         await update.message.reply_text("Usage: /ask <your question>")
         return
     await context.bot.send_chat_action(update.effective_chat.id, action="typing")
-    reply = ask_ai(question)
-    await update.message.reply_text(reply)
+    result = ask_ai_smart(question, update.effective_chat.id)
+    await update.message.reply_text(result.get("response", "No response"))
 
 async def week_update_cmd(update, context):
     await update.message.reply_text("Send your weekly class timetable (any format) or type `skip`.")
@@ -1163,7 +1126,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history = context.user_data.get('chat_history', [])
         user_msg = update.message.text
         history.append({"role":"user","content": user_msg})
-        reply = ask_ai(user_msg, chat_history=history)
+        result = ask_ai_smart(user_msg, chat_id)
+        reply = result.get("response", "I didn't understand.")
         history.append({"role":"assistant","content": reply})
         context.user_data['chat_history'] = history
         await update.message.reply_text(reply)
@@ -1225,11 +1189,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             memory["schedule"]["sleep"] = sleep
             memory["schedule"]["study_hours"] = hours
             save_json("schedule", memory["schedule"])
-            # Re-schedule morning check-in
             for job in context.application.job_queue.jobs():
-                if job.name == "morning_checkin" and job.chat_id == update.effective_chat.id:
+                if job.name == "morning_checkin" and job.chat_id == chat_id:
                     job.schedule_removal()
-            schedule_morning_checkin(context.application.job_queue, wake, update.effective_chat.id)
+            schedule_morning_checkin(context.application.job_queue, wake, chat_id)
             await update.message.reply_text("Schedule updated. Morning check‑in will now happen at the new wake‑up time.")
             context.user_data['mode'] = None
         return
@@ -1276,10 +1239,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['mode'] = None
         return
 
-    # Natural language fallback (always active)
+    # Natural language fallback
     handled = await handle_natural_language(update, context)
     if not handled:
         await update.message.reply_text("🤖 Use /help to see commands, or just ask me naturally (e.g., 'What's my backlog?', 'Set wake-up to 7am').")
+
+# ---------- Smart natural language handler ----------
+async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat_id = update.effective_chat.id
+    user_message = update.message.text
+    lower_msg = user_message.lower()
+    if re.search(r"(what|show|tell).*backlog", lower_msg):
+        tasks = [t for t in memory["backlog"].get("tasks",[]) if t.get("status") != "done"]
+        if not tasks:
+            await update.message.reply_text("No pending backlog tasks.")
+        else:
+            msg = "📋 Backlog:\n" + "\n".join(f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in tasks[:10])
+            await update.message.reply_text(msg)
+        return True
+    if re.search(r"(what|show|tell).*(today'?s plan|todo|to-do)", lower_msg):
+        todo = memory["today"].get("todo", [])
+        if not todo:
+            await update.message.reply_text("Today's plan not generated yet. Use /start_day or wait for morning check-in.")
+        else:
+            msg = "📅 Today's To‑Do:\n" + "\n".join(f"• {t['subject']} - {t['chapter']} ({t['type']}) – {t['estimated_time']} min" for t in todo[:10])
+            await update.message.reply_text(msg)
+        return True
+    if re.search(r"(streak|how many days)", lower_msg):
+        s = memory["stats"]
+        await update.message.reply_text(f"🔥 Current streak: {s.get('streak',0)} days. Best: {s.get('longest_streak',0)} days.")
+        return True
+    if re.search(r"(weak|difficult).* chapters?", lower_msg):
+        weak = get_weak_chapters()
+        if not weak:
+            await update.message.reply_text("No weak chapters reported.")
+        else:
+            await update.message.reply_text(f"⚠️ Weak chapters: {', '.join(weak[:5])}.")
+        return True
+    await context.bot.send_chat_action(chat_id, action="typing")
+    result = ask_ai_smart(user_message, chat_id)
+    response = result.get("response", "I didn't understand that.")
+    updates = result.get("updates", [])
+    if updates:
+        update_msg = apply_updates(updates)
+        if update_msg:
+            response += f"\n\n{update_msg}"
+    add_to_conversation(chat_id, "user", user_message)
+    add_to_conversation(chat_id, "assistant", response)
+    await update.message.reply_text(response)
+    return True
 
 # ---------- PDF handling and schedule ----------
 async def weekly_schedule_prompt(context):
@@ -1348,7 +1356,6 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("test_morning", test_morning_cmd))  # hidden debug command
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("chat", chat_cmd))
     app.add_handler(CommandHandler("stop", stop_cmd))
@@ -1373,17 +1380,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("notify", notify_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
-    # Do NOT schedule morning check-in here (needs a chat_id). It will be scheduled when user runs /start.
-    # Other scheduled jobs that don't need a specific chat_id can be added:
     if app.job_queue:
-        schedule_weekly_pdf_prompt(app.job_queue, None)  # This will ask for PDF on Saturday, but chat_id is None – better to schedule per user after start.
-        # Actually, we should schedule weekly PDF prompt only after we have a chat_id. For simplicity, remove it.
-        # Instead, we'll rely on the /start command to set it up later. For now, leaving it as None will not work.
-        # Let's comment it out:
-        # schedule_weekly_pdf_prompt(app.job_queue, None)
-        # We'll add it in the /start command. Modify /start to also schedule weekly PDF prompt.
-        pass
-    # Also schedule test followups – they use bot_data["user_chat_id"] later.
-    schedule_test_followups(app)
+        schedule_test_followups(app)
     print("Bot polling...")
     app.run_polling()
