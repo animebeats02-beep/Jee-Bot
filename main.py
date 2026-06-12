@@ -1889,6 +1889,48 @@ async def ai_flashcard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = ask_ai_smart(prompt, update.effective_chat.id)
         reply = response.get("response", "Could not generate.")
         await update.message.reply_text(reply)
+    async def notify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Configure periodic notifications."""
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /notify on|off|interval <minutes>|status")
+        return
+    action = args[0].lower()
+    chat_id = update.effective_chat.id
+    notify_settings = memory["schedule"].get("notifications", {"enabled": True, "interval_minutes": 120})
+    if action == "on":
+        notify_settings["enabled"] = True
+        memory["schedule"]["notifications"] = notify_settings
+        save_json("schedule", memory["schedule"])
+        schedule_notifications(context.application.job_queue, chat_id,
+                              notify_settings.get("interval_minutes",120), True)
+        await update.message.reply_text("✅ Notifications enabled.")
+    elif action == "off":
+        notify_settings["enabled"] = False
+        memory["schedule"]["notifications"] = notify_settings
+        save_json("schedule", memory["schedule"])
+        schedule_notifications(context.application.job_queue, chat_id, 0, False)
+        await update.message.reply_text("🔕 Notifications disabled.")
+    elif action == "interval" and len(args) >= 2:
+        try:
+            interval = int(args[1])
+            if interval < 15:
+                await update.message.reply_text("Interval must be at least 15 minutes.")
+                return
+            notify_settings["interval_minutes"] = interval
+            memory["schedule"]["notifications"] = notify_settings
+            save_json("schedule", memory["schedule"])
+            schedule_notifications(context.application.job_queue, chat_id,
+                                  interval, notify_settings.get("enabled",True))
+            await update.message.reply_text(f"⏲️ Notification interval set to {interval} minutes.")
+        except ValueError:
+            await update.message.reply_text("Please provide a number (minutes).")
+    elif action == "status":
+        enabled = notify_settings.get("enabled", True)
+        interval = notify_settings.get("interval_minutes", 120)
+        await update.message.reply_text(f"🔔 Notifications: {'ON' if enabled else 'OFF'}\n⏱️ Interval: {interval} minutes")
+    else:
+        await update.message.reply_text("Invalid. Use: /notify on|off|interval <minutes>|status")
 
 # ---------- Register new command handlers ----------
 # Add these lines to your main block (you will need to add them manually or we can provide the entire main block again)
@@ -1916,7 +1958,6 @@ async def ai_flashcard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Because this extension does not overwrite your existing code, you need to manually add the above lines to your main block and handle_message.
 # I'll provide a patch section below that you can copy and paste to insert.
 
-print("\n✅ Extension code loaded. Now manually add the new command handlers to your main block as shown above.")
 
 # ---------- Main ----------
 if __name__ == "__main__":
